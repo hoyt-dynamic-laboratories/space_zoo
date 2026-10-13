@@ -1,0 +1,374 @@
+{
+  "dog_walk": {
+    "width": 180,
+    "height": 102,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "dog_idle": {
+    "width": 180,
+    "height": 102,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "dog_forage": {
+    "width": 180,
+    "height": 102,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "dog_rest": {
+    "width": 180,
+    "height": 102,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "dog_look": {
+    "width": 180,
+    "height": 102,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "dog_sit": {
+    "width": 180,
+    "height": 102,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "stag_walk": {
+    "width": 87,
+    "height": 69,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "stag_idle": {
+    "width": 87,
+    "height": 69,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "stag_forage": {
+    "width": 87,
+    "height": 69,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "stag_rest": {
+    "width": 87,
+    "height": 69,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "stag_look": {
+    "width": 87,
+    "height": 69,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "doe_walk": {
+    "width": 66,
+    "height": 48,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "doe_idle": {
+    "width": 66,
+    "height": 48,
+    "frames": 8,
+    "unique_frames": 4
+  },
+  "doe_forage": {
+    "width": 66,
+    "height": 48,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "doe_rest": {
+    "width": 66,
+    "height": 48,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "doe_look": {
+    "width": 66,
+    "height": 48,
+    "frames": 8,
+    "unique_frames": 4
+  },
+  "fawn_walk": {
+    "width": 48,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "fawn_idle": {
+    "width": 48,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 4
+  },
+  "fawn_forage": {
+    "width": 48,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "fawn_rest": {
+    "width": 48,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "fawn_look": {
+    "width": 48,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 4
+  },
+  "chupacabra_walk": {
+    "width": 63,
+    "height": 57,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "chupacabra_idle": {
+    "width": 63,
+    "height": 57,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "chupacabra_forage": {
+    "width": 63,
+    "height": 57,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "chupacabra_rest": {
+    "width": 63,
+    "height": 57,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "chupacabra_look": {
+    "width": 63,
+    "height": 57,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "chicken_walk": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "chicken_idle": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "chicken_forage": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "chicken_dust": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "chicken_rest": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "chicken_look": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "chicken_flutter": {
+    "width": 60,
+    "height": 36,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "guinea_walk": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "guinea_idle": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "guinea_forage": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "guinea_dust": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "guinea_rest": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "guinea_look": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "guinea_flutter": {
+    "width": 60,
+    "height": 39,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "keet_walk": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "keet_idle": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "keet_forage": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "keet_dust": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "keet_rest": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "keet_look": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "keet_flutter": {
+    "width": 54,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "sasquatch_walk": {
+    "width": 72,
+    "height": 81,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "sasquatch_idle": {
+    "width": 72,
+    "height": 81,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "cardinal_fly": {
+    "width": 48,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "cardinal_idle": {
+    "width": 42,
+    "height": 24,
+    "frames": 8,
+    "unique_frames": 2
+  },
+  "bluejay_fly": {
+    "width": 48,
+    "height": 30,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "bluejay_idle": {
+    "width": 48,
+    "height": 24,
+    "frames": 8,
+    "unique_frames": 2
+  },
+  "heron_fly": {
+    "width": 120,
+    "height": 54,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "heron_idle": {
+    "width": 81,
+    "height": 54,
+    "frames": 8,
+    "unique_frames": 2
+  },
+  "bat_fly": {
+    "width": 42,
+    "height": 24,
+    "frames": 8,
+    "unique_frames": 5
+  },
+  "bat_rest": {
+    "width": 42,
+    "height": 24,
+    "frames": 8,
+    "unique_frames": 1
+  },
+  "cat_walk": {
+    "width": 39,
+    "height": 27,
+    "frames": 8,
+    "unique_frames": 8
+  },
+  "cat_idle": {
+    "width": 39,
+    "height": 27,
+    "frames": 8,
+    "unique_frames": 2
+  },
+  "cat_forage": {
+    "width": 39,
+    "height": 27,
+    "frames": 8,
+    "unique_frames": 2
+  },
+  "cat_scratch": {
+    "width": 39,
+    "height": 27,
+    "frames": 8,
+    "unique_frames": 2
+  },
+  "cat_rest": {
+    "width": 39,
+    "height": 27,
+    "frames": 8,
+    "unique_frames": 1
+  }
+}

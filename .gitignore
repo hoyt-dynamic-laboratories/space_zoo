@@ -1,0 +1,21 @@
+# Rust build output; Cargo.lock is intentionally tracked.
+/target/
+
+# Python tooling caches.
+__pycache__/
+*.py[cod]
+.venv/
+
+# Generated development previews at the repository root.
+/*_PREVIEW.png
+/*_ANIMATION.gif
+/ANIMALS_*.gif
+/TOURBILLON_*.gif
+
+# Local editor and OS leftovers.
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Keep all artwork and baked data under assets/ tracked.

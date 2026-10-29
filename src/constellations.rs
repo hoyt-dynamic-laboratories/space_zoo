@@ -6,7 +6,7 @@
 //! This is an artistic cylindrical panorama, not a calibrated planetarium lens.
 //! A native-pixel overlay is masked by the EXISTING hills/pines, before solar
 //! bodies are drawn. No allocations, clock reads, or ephemeris calls per frame.
-use std::f64::consts::{PI, TAU};
+use std::f64::consts::TAU;
 use crate::pixel::{Canvas, ART_SCALE};
 use crate::world::FPS;
 
@@ -265,8 +265,8 @@ impl ConstellationOverlay {
             .map(|p|((p.x*ART_SCALE as f32).round() as i32,
                       (p.y*ART_SCALE as f32).round() as i32))
     }
-    fn refresh(&mut self,unix:i64,w:usize,h:usize,diagnostic:bool){
-        let bucket=if diagnostic {unix/60} else {unix/4};
+    fn refresh(&mut self,unix:i64,w:usize,h:usize){
+        let bucket=unix/4;
         if self.cache_key==bucket && self.width==w && self.height==h {return;}
         let lst=sidereal_deg(unix);
         let mut n=0;
@@ -279,21 +279,16 @@ impl ConstellationOverlay {
         self.polaris=pose(POLARIS,lst,w,h);
         self.cache_key=bucket;self.width=w;self.height=h;
     }
-    /// `clock_unix`: system date plus `--hour` clock override, if any.
-    /// Diagnostic mode advances star time alone at 30min per wall second;
-    /// animal schedules and the existing moon/sun/planet systems do not change.
     pub fn draw(&mut self,c:&mut Canvas,scenery:&Canvas,clock_unix:i64,
-        daylight:f32,tick:u64,diagnostic:bool) {
+        daylight:f32,tick:u64) {
         let Some(mask)=scenery.occluded.as_ref() else {return;};
-        let night=if diagnostic {1.0} else {(1.0-daylight).clamp(0.0,1.0).powi(3)};
+        let night=(1.0-daylight).clamp(0.0,1.0).powi(3);
         if night<0.015 {return;}
-        let unix=if diagnostic {clock_unix.saturating_add((tick*60) as i64)}
-            else {clock_unix};
-        self.refresh(unix,c.w,c.h,diagnostic);
+        let unix=clock_unix;
+        self.refresh(unix,c.w,c.h);
         // A steady true-north pivot; none of the constellations are sprites.
         dot(c,mask,self.polaris,night,tick,STAR_TOTAL);
         // .4427: display the same native-pixel names in normal night mode.
-        // `diagnostic` still controls ONLY the accelerated inspection clock.
         if self.polaris.alt>12.0 {
             label(c,mask,(self.polaris.x*ART_SCALE as f32) as i32+5,
                 (self.polaris.y*ART_SCALE as f32) as i32-12,"POLARIS");
@@ -371,12 +366,12 @@ mod tests {
     }
     #[test] fn normal_night_labels_polaris_without_inspection_flag(){
         // This glyph location is separate from the star itself. In .4426 the
-        // label was missing without --constellation; in .4427 it is permanent.
+        // label was previously inspection-only; in .4427 it became permanent.
         let mut overlay=ConstellationOverlay::new();
         let mut frame=Canvas::scaled(320,200,ART_SCALE,false);
         frame.clear(0x101010);
         let scenery=Canvas::scaled(320,200,ART_SCALE,true);
-        overlay.draw(&mut frame,&scenery,1_800_000_000,0.0,0,false);
+        overlay.draw(&mut frame,&scenery,1_800_000_000,0.0,0);
         assert!(overlay.polaris.alt>12.0);
         let x=(overlay.polaris.x*ART_SCALE as f32) as usize+5;
         let y=(overlay.polaris.y*ART_SCALE as f32) as usize-12;
@@ -389,7 +384,7 @@ mod tests {
         assert_eq!(overlay.points.len(),STAR_TOTAL);
         let mut frame=Canvas::scaled(100,70,ART_SCALE,false);frame.clear(0x101010);
         let scenery=Canvas::scaled(100,70,ART_SCALE,true);
-        overlay.draw(&mut frame,&scenery,1_700_000_000,1.0,0,false);
+        overlay.draw(&mut frame,&scenery,1_700_000_000,1.0,0);
         assert!(frame.cells.iter().all(|&p|p==0x101010));
     }
 }

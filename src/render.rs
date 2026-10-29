@@ -7,6 +7,18 @@ use crate::habitat::Place;
 use crate::sprite::{self, Sprite};
 use crate::world::{Point, World};
 
+// Keep both the current ASCII frame and the diff frame bounded. Dimensions
+// come from the terminal and may also arrive in synthetic resize events.
+pub(crate) const MAX_ASCII_CELLS: usize = 100_000;
+pub(crate) const MIN_ASCII_WIDTH: u16 = 40;
+pub(crate) const MIN_ASCII_HEIGHT: u16 = 14;
+
+pub(crate) fn ascii_dimensions_supported(width: u16, height: u16) -> bool {
+    width >= MIN_ASCII_WIDTH && height >= MIN_ASCII_HEIGHT
+        && (width as usize).checked_mul(height as usize)
+            .is_some_and(|cells| cells <= MAX_ASCII_CELLS)
+}
+
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct Cell { glyph: char, color: Color }
 
@@ -73,7 +85,13 @@ impl Renderer {
     }
 
     pub fn draw(&mut self, world: &World) -> io::Result<()> {
-        if self.width == 0 || self.height == 0 { return Ok(()); }
+        self.draw_time_machine(world,None)
+    }
+    pub fn draw_time_machine(&mut self, world: &World,
+        panel:Option<&crate::time_machine::Panel>) -> io::Result<()> {
+        // Defense in depth: do not allocate even if a caller forgets to
+        // validate a terminal size before constructing/resizing the renderer.
+        if !ascii_dimensions_supported(self.width, self.height) { return Ok(()); }
         let mut frame = Frame::new(self.width, self.height);
 
         // Same sparse, scattered cyan dots as the original Bash zoo.
@@ -109,10 +127,26 @@ impl Renderer {
                 _ => {}
             }
         }
-        if w > 12 && h > 15 {
-            let sky = if world.clock.is_day() { 'O' } else { 'C' };
-            frame.put(w - 8, 2, sky, if world.clock.is_day() {
-                Color::Yellow } else { Color::White });
+        // ASCII shares the SAME rise/set clocks and artistic path as the
+        // framebuffer. Daylight changes lunar color, never horizon visibility.
+        let [sun,moon]=world.sky.celestial_pair(
+            world.clock.seconds_today(),self.width,self.height);
+        if let Some(moon)=moon {
+            let phase=world.sky.moon_phase();
+            let glyph=match (phase*8.0) as u8 {
+                0 | 7 => '.',      // near-new / thin waning crescent
+                1 => ')',          // waxing crescent
+                2 | 3 => 'D',      // quarter / waxing gibbous
+                4 => 'O',          // full
+                _ => 'C',          // waning gibbous / quarter
+            };
+            let light=world.sky.solar_daylight(world.clock.seconds_today());
+            frame.put(moon.center.x,moon.center.y,glyph,
+                if light>0.65 {Color::Grey} else {Color::White});
+        }
+        // Sun is painted last if the characters share a cell.
+        if let Some(sun)=sun {
+            frame.put(sun.center.x,sun.center.y,'O',Color::Yellow);
         }
 
         // The coop shares its physical doorway with the pixel renderer.
@@ -154,6 +188,49 @@ impl Renderer {
             frame.art(visitor.pos, visitor.lines, visitor.color, false);
         }
 
+        if world.sky.fast() {
+            // ASCII has no pixel jumbotron. A compact lower-edge clock avoids
+            // an unrelated top-left HUD while retaining working --ff controls.
+            let place=world.sky.location().expect("configured Time Machine");
+            let hud=format!("{}  LAT {:+.3}  LON {:+.3}  {}  {}X",
+                crate::time_machine::format_utc(world.sky.now_secs()),
+                place.latitude,place.longitude,
+                if world.sky.rate()==0.0 {"STOPPED"} else if world.sky.rate()>0.0 {"FORWARD"} else {"BACKWARD"},
+                world.sky.rate().abs());
+            let draw_line=|frame:&mut Frame,y:i32,text:&str| {
+                let text=if text.len()>frame.width as usize {
+                    &text[..frame.width as usize]
+                } else {text};
+                let x=((frame.width as i32-text.len() as i32)/2).max(0);
+                for col in 0..frame.width as i32 {frame.put(col,y,' ',Color::White);}
+                for (i,ch) in text.chars().enumerate(){frame.put(x+i as i32,y,ch,Color::White);}
+            };
+            draw_line(&mut frame,h-1,&hud);
+            if let Some(panel)=panel {
+                if panel.open {
+                    let height=(crate::time_machine::COMMAND_LINES.len()+3) as i32;
+                    let top=((h-height)/2).max(0);
+                    for (i,line) in crate::time_machine::COMMAND_LINES.iter().enumerate() {
+                        let y=top+i as i32;
+                        if y<h-1 {
+                            if i==0 {
+                                let active=format!("SPACE TIME MACHINE | STARS {}X",
+                                    crate::display_settings::format_multiplier(world.sky.star_multiplier()));
+                                draw_line(&mut frame,y,&active);
+                            } else {draw_line(&mut frame,y,line);}
+                        }
+                    }
+                    let line=if panel.editing {format!(":{}_",panel.input)} else {
+                        "PRESS SHIFT+: TO ENTER COMMAND".into()
+                    };
+                    if top+height-3<h-1 {draw_line(&mut frame,top+height-3,&line);}
+                    if !panel.error.is_empty() && top+height-2<h-1 {
+                        draw_line(&mut frame,top+height-2,&panel.error);
+                    }
+                }
+            }
+        }
+
         if self.previous.len() != frame.cells.len() {
             queue!(self.out, Clear(ClearType::All))?;
             self.previous = vec![Cell { glyph: '\0', color: Color::Reset }; frame.cells.len()];
@@ -174,5 +251,38 @@ impl Renderer {
         self.out.flush()?;
         self.previous = frame.cells;
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::ascii_dimensions_supported as supported;
+
+    #[test]
+    fn accepts_normal_and_maximum_ascii_frame_sizes() {
+        assert!(supported(40, 14));
+        assert!(supported(240, 70));
+        assert!(supported(500, 200)); // exactly 100,000 cells
+    }
+
+    #[test]
+    fn rejects_excessive_and_too_small_terminal_dimensions() {
+        assert!(!supported(500, 201)); // above the 100,000-cell ceiling
+        assert!(!supported(u16::MAX, u16::MAX));
+        assert!(!supported(39, 14));
+        assert!(!supported(40, 13));
+        assert!(!supported(0, 0));
+    }
+
+    #[test]
+    fn renderer_skips_allocation_after_an_extreme_resize() {
+        use super::Renderer;
+        use crate::world::{DisplayMode, World};
+
+        let world = World::with_hour(80, 24, 7, DisplayMode::Ascii, Some(12));
+        let mut renderer = Renderer::new(80, 24);
+        renderer.resize(u16::MAX, u16::MAX);
+        renderer.draw(&world).expect("oversized dimensions must be skipped");
+        assert!(renderer.previous.is_empty());
     }
 }

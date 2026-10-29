@@ -154,17 +154,6 @@ impl DeerHerd {
     }
 }
 
-fn palette(ch:char,kind:DeerKind)->Option<u32> {
-    let (body,shade,light)=if kind==DeerKind::Fawn {
-        (0xd89150,0xa95733,0xf0bd78)
-    }else{(0xab5635,0x713322,0xd18a54)};
-    Some(match ch {
-        'b'=>body,'s'=>shade,'h'=>light,'a'=>0x693422,
-        'o'=>0x2f211e,'e'=>0x211817,'n'=>0x351b17,
-        'l'=>shade,'w'=>0xf5e4c5,'p'=>0xf6c98a,
-        _=>return None,
-    })
-}
 // All variants share one bounded 29x23 / 22x16 / 16x12 footprint.
 // Stag's high branching antlers and the fawn's speckles distinguish family.
 const STAG_WALK:&[&str]=&[

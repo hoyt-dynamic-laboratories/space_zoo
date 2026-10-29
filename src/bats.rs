@@ -64,34 +64,12 @@ impl BatPair {
     pub fn ascii_sprite(&self,i:usize)->Option<(Point,&'static [&'static str],Color)> {
         let bat=self.pair.get(i)?;
         if !bat.visible {return None;}
-        let art=if bat.action==BatAction::Roost {&ROOST_TEXT[..]}
-            else if bat.action==BatAction::Swoop {&SILHOUETTE_LOW[..]}
-            else {&SILHOUETTE[..]};
+        let art=if bat.action==BatAction::Roost {ROOST_TEXT}
+            else if bat.action==BatAction::Swoop {SILHOUETTE_LOW}
+            else {SILHOUETTE};
         Some((Point{x:bat.pos.x-4,y:bat.pos.y-1},art,Color::DarkRed))
     }
 }
-// Black / red-brown wing silhouettes, two discrete flight shapes.
-const WINGS_UP:&[&str]=&[
-    "k        k",
-    "kkk kk kkk",
-    " kkbrrbkk ",
-    "  kbbbbk  ",
-    "    kk    ",
-];
-const WINGS_DOWN:&[&str]=&[
-    "   kkkk   ",
-    " kkbrrbkk ",
-    "kk kbbk kk",
-    "k   kk   k",
-    "           ",
-];
-const ROOST:&[&str]=&[
-    "    kk    ",
-    "   kbbk   ",
-    "   kbbrk   ",
-    "    bb    ",
-    "    kk    ",
-];
 const ROOST_TEXT:&[&str]=&[
     r"  /\  ",
     r" (oo) ",

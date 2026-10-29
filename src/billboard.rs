@@ -1,18 +1,22 @@
-//! Rev 0.451: cached native-pixel billboard with small independent dirty regions.
+//! Rev 0.54: cached native-pixel billboard with small independent dirty regions.
 //! Structural art is painted once, /proc updates redraw only the telemetry
 //! windows, clock animation restores only its 101x101 dial, and the HDL sign
 //! is touched only when its visible lighting state changes. The final frame
-//! still composites as the exact same transparent 312x462-pixel overlay.
+//! still composites inside the same transparent 312x462-pixel overlay.
 use crate::pixel::{Canvas, ART_SCALE, WIDTH};
 use crate::circadian::ClockDate;
-use crate::telemetry::{Die, Snapshot, Meter, TOP_PROCESSES, NET_HISTORY};
+use crate::telemetry::{Die, Snapshot, Meter, CpuBand, CoreState, TOP_PROCESSES, NET_HISTORY};
 use std::f32::consts::{PI, TAU};
+use std::time::{Duration, Instant};
 
 // Game (320x200) coordinates. W includes the separated HDL neon sidecar.
 // Hillside position on the 320x200 game grid. Change these two values
 // only to shift the whole assembly; the instruments and sign move together.
 pub const X: i32 = 7;
 pub const Y: i32 = 0;
+// v0.55.01 default Null Island placement. The locked --og path continues to use X/Y.
+pub const NULL_ISLAND_X: i32 = 8;  // 24 native px from the left edge.
+pub const NULL_ISLAND_Y: i32 = 59; // support bottom row 405 lands at native y=582.
 pub const W: usize = 104; // 312px overlay: 270px main cabinet + gap + narrow HDL sidecar
 pub const H: usize = 154; // Original hillside footprint and buried supports retained.
 // Native-pixel instrument geometry. The 270px upper cabinet matches
@@ -21,7 +25,9 @@ pub const H: usize = 154; // Original hillside footprint and buried supports ret
 const TOP_X: i32 = 0;
 const TOP_Y: i32 = 104;
 const TOP_W: i32 = 270;
-const TOP_H: i32 = 116;
+// v0.54 grows the upper cabinet downward only far enough to contain one live
+// host/CPU strip; the clock and die geometry above it does not move.
+const TOP_H: i32 = 136;
 // 4x4 matrices remain 16 independent telemetry pixels per package; only
 // their presentation size is reduced to give the clock its own clear ring.
 const DIE_Y: i32 = 123;
@@ -30,14 +36,20 @@ const DIE_SIZE: i32 = 12;
 const DIE_PITCH: i32 = 15;
 const DEAD_DIE: u32 = 0x101216; // Deep graphite: a missing die is not a green idle die.
 
-// Sharp native 5x7 glyphs. MEM, DISK and NET share the original panel
-// with five 8px process slots. No increase in cabinet height or footprint.
+// The three side-by-side instruments use the same 5x7 text as PROC.
+// Compact, aligned readings above the unchanged five-process list.
+// Keep the upper cabinet and hillside anchors fixed; reclaim lower height.
+const LOWER_Y: i32 = 245;
+const LOWER_H: i32 = 114;
+const HOST_ROW_Y: i32 = 220;
+const HOST_ROW_H: i32 = 15;
+const SYSTEM_ROW_Y: i32 = 252;
+const SYSTEM_ROW_H: i32 = 34;
 const NAME_CHARS: usize = 26;
-const PROCESS_ROW_Y: i32 = 312;
-const PROCESS_ROW_PITCH: i32 = 11;
-const PROCESS_ROW_HEIGHT: i32 = 9;
-const MEM_DISK_Y: i32 = 232;
-const NET_Y: i32 = 264;
+const PROCESS_LABEL_Y: i32 = 292;
+const PROCESS_ROW_Y: i32 = 303;
+const PROCESS_ROW_PITCH: i32 = 10;
+const PROCESS_ROW_HEIGHT: i32 = 8;
 // The clock IS the central upper instrument, not a separate rooftop watch.
 // 98px diameter in a 116px-high housing, centered between the two die panels.
 const CLOCK_X: i32 = 135;
@@ -54,10 +66,12 @@ const GYRO_TICKS_PER_FRAME: u64 = 5;
 const CLOCK_RECT: (usize,usize,usize,usize) =
     ((CLOCK_X-CLOCK_RADIUS-1) as usize,(CLOCK_Y-CLOCK_RADIUS-1) as usize,101,101);
 const HDL_RECT: (usize,usize,usize,usize) = (260,109,50,107);
-const DIE_CORE_RECTS: [(usize,usize,usize,usize);2] = [(17,123,57,57),(198,123,57,57)];
+pub(crate) const DIE_CORE_RECTS: [(usize,usize,usize,usize);2] = [(17,123,57,57),(198,123,57,57)];
 const DIE_FOOTER_RECTS: [(usize,usize,usize,usize);2] = [(17,194,58,7),(198,194,58,7)];
-const USAGE_RECT: (usize,usize,usize,usize) = (10,232,250,61);
-const PROCESS_RECT: (usize,usize,usize,usize) = (10,312,250,53);
+const HOST_RECT: (usize,usize,usize,usize) = (10,HOST_ROW_Y as usize,250,HOST_ROW_H as usize);
+const USAGE_RECT: (usize,usize,usize,usize) = (10,SYSTEM_ROW_Y as usize,250,SYSTEM_ROW_H as usize);
+const PROCESS_RECT: (usize,usize,usize,usize) = (10,PROCESS_ROW_Y as usize,250,48);
+const FACE_BOTTOM: usize = (LOWER_Y+LOWER_H) as usize;
 const CREAM: u32 = 0xece5d5;
 const CLOCK_PLATINUM_MID: u32 = 0xb6c0c7;
 const CLOCK_PLATINUM_SHADOW: u32 = 0x7f8c95;
@@ -70,6 +84,28 @@ const CHARCOAL: u32 = 0x131b24;
 const RAM_COLOR: u32 = 0xa8cee0;
 const CPU_COLOR: u32 = 0xb2e2c3;
 
+/// Simulated UTC/location/motion status, independent of real host telemetry.
+/// The --ff live path paints it outside the telemetry cabinet.
+#[derive(Clone,Debug,PartialEq,Eq)]
+pub struct TimeHud {
+    pub utc:String, pub location:String, pub direction:&'static str, pub speed:String,
+}
+impl TimeHud {
+    pub fn from_sky(sky:&crate::sky::SkyState)->Self {
+        let place=sky.location().expect("--ff location initialized");
+        let rate=sky.rate();
+        let direction=if rate==0.0 {"STOPPED"} else if rate>0.0 {"FORWARD"} else {"BACKWARD"};
+        let digits=format!("{:.6}",rate.abs());
+        let speed=format!("{}X",digits.trim_end_matches('0').trim_end_matches('.'));
+        Self {
+            utc:crate::time_machine::format_utc(sky.now_secs()),
+            location:format!("{:+.6}, {:+.6}",place.latitude,place.longitude),
+            direction,speed,
+        }
+    }
+}
+pub(crate) const TIME_HUD_RECT:(usize,usize,usize,usize)=(10,(LOWER_Y+1) as usize,250,(LOWER_H-2) as usize);
+
 pub struct Billboard {
     snapshot: Snapshot,
     date: ClockDate,
@@ -79,10 +115,14 @@ pub struct Billboard {
     image: Canvas,
     supports: Canvas,
     dirty: bool,             // New /proc snapshot (or initial paint).
+    cpu_dirty: bool,         // Stale CPU tiles only; keep other meters untouched.
+    cpu_stale: bool,
+    last_cpu_received: Instant, // Monotonic watchdog, never simulation time.
     clock_dirty: bool,       // Date changed independently of /proc.
     last_lighting: Option<(bool, bool)>, // day, visible neon brightness
     last_minute: Option<u32>,
     last_gyro: Option<u8>,
+    time_hud:Option<TimeHud>,hud_dirty:bool,
 }
 impl Billboard {
     pub fn new(snapshot: Snapshot) -> Self {
@@ -93,12 +133,45 @@ impl Billboard {
         let mut image=Canvas::scaled(W,H,ART_SCALE,false);
         image.cells.copy_from_slice(&base.cells);
         Self { snapshot, date:ClockDate{weekday:0,day:1}, base, image, supports,
-            dirty:true, clock_dirty:true, last_lighting:None,
-            last_minute:None,last_gyro:None }
+            dirty:true, cpu_dirty:false, cpu_stale:false,
+            last_cpu_received:Instant::now(),clock_dirty:true,last_lighting:None,
+            last_minute:None,last_gyro:None,time_hud:None,hud_dirty:false }
+    }
+    /// Startup placeholder, replaced by the first live /proc snapshot.
+    /// Constructing a billboard never initiates polling.
+    pub fn unavailable()->Self {
+        use crate::telemetry::{CoreReading,CoreState,Row,SystemStats};
+        let dies=(0..2).map(|package| Die {
+            package,temp_c:None,cores:(0..16).map(|id|CoreReading {
+                id:package*16+id,state:CoreState::Invalid,
+            }).collect(),
+        }).collect();
+        let rows=(0..=TOP_PROCESSES).map(|_|Row {
+            name:"--".into(),mem:"--".into(),cpu:"--".into(),
+        }).collect();
+        Self::new(Snapshot{dies,rows,system:SystemStats::default()})
+    }
+    pub fn set_time_hud(&mut self,hud:TimeHud)->bool {
+        if self.time_hud.as_ref()==Some(&hud) {return false;}
+        self.time_hud=Some(hud);self.hud_dirty=true;true
     }
     pub fn update(&mut self, snapshot: Snapshot) {
         self.snapshot = snapshot;
         self.dirty = true;
+        self.cpu_dirty = false;
+        self.cpu_stale = false; // A new poll may contain valid data again.
+        self.last_cpu_received = Instant::now();
+    }
+    // One transition per stall; a fresh snapshot resets the watchdog and
+    // immediately repaints with its actual valid/invalid core readings.
+    pub fn expire_cpu_if_stale(&mut self, now:Instant)->bool {
+        if !self.cpu_stale && !self.snapshot.dies.is_empty() &&
+            now.saturating_duration_since(self.last_cpu_received)>=Duration::from_secs(6) {
+            self.cpu_stale=true;
+            self.cpu_dirty=true;
+            return true;
+        }
+        false
     }
     pub fn set_date(&mut self, date:ClockDate) {
         if self.date!=date {self.date=date; self.clock_dirty=true;}
@@ -125,6 +198,10 @@ impl Billboard {
         if self.dirty {
             self.redraw_telemetry();
             self.dirty=false;
+            self.cpu_dirty=false;
+        } else if self.cpu_dirty {
+            self.redraw_cpu_matrices();
+            self.cpu_dirty=false;
         }
         let gyro_phase=((tick/GYRO_TICKS_PER_FRAME)%GYRO_STEPS as u64) as u8;
         let minute=seconds_today/60;
@@ -135,6 +212,11 @@ impl Billboard {
             self.clock_dirty=false;
             self.last_minute=Some(minute);
             self.last_gyro=Some(gyro_phase);
+        }
+        if self.hud_dirty {
+            restore_rect(&mut self.image,&self.base,TIME_HUD_RECT);
+            if let Some(hud)=&self.time_hud {draw_time_hud(&mut self.image,hud);}
+            self.hud_dirty=false;
         }
         // Eight logical HDL phases have only TWO distinct painted states.
         // At daytime the sign is always unpowered. Avoid redrawing an
@@ -151,9 +233,17 @@ impl Billboard {
         for rect in DIE_CORE_RECTS.into_iter().chain(DIE_FOOTER_RECTS) {
             restore_rect(&mut self.image,&self.base,rect);
         }
+        restore_rect(&mut self.image,&self.base,HOST_RECT);
         restore_rect(&mut self.image,&self.base,USAGE_RECT);
         restore_rect(&mut self.image,&self.base,PROCESS_RECT);
-        draw_telemetry(&mut self.image,&self.snapshot);
+        draw_telemetry(&mut self.image,&self.snapshot,self.cpu_stale);
+        if self.time_hud.is_some() {self.hud_dirty=true;}
+    }
+    fn redraw_cpu_matrices(&mut self) {
+        for rect in DIE_CORE_RECTS {
+            restore_rect(&mut self.image,&self.base,rect);
+        }
+        draw_cpu_matrices(&mut self.image,&self.snapshot,self.cpu_stale);
     }
     // Supports occupy their actual hillside depth. The far hill still hides
     // their buried lower ends; the cabinets are intentionally absent here.
@@ -176,8 +266,30 @@ impl Billboard {
             let src=&self.supports.cells[row*width..(row+1)*width];
             let dst=&mut target.cells[y*stride+ox..y*stride+ox+width];
             for (col,(&s,d)) in src.iter().zip(dst.iter_mut()).enumerate(){
-                if s!=0 && (row<370 || y<hill_cutoff[col]) &&
+                if s!=0 && (row<FACE_BOTTOM || y<hill_cutoff[col]) &&
                     damage.map_or(true,|mask|mask[(y/crate::pixel::TILE)*crate::pixel::TILES_X+(ox+col)/crate::pixel::TILE]) {*d=s;}
+            }
+        }
+    }
+    /// v0.55.01 default-scene placement only: the same cached support art is
+    /// translated as a group and left unburied so both pylons terminate in water.
+    pub fn draw_supports_at(&mut self,target:&mut Canvas,day:bool,tick:u64,
+            seconds_today:u32,x:i32,y:i32) {
+        self.refresh(day,tick,seconds_today);
+        let stride=target.w*target.scale;
+        debug_assert_eq!(stride,WIDTH);
+        let ox=x as usize*ART_SCALE;
+        let oy=y as usize*ART_SCALE;
+        let width=W*ART_SCALE;
+        if !target.overlaps(ox as i32,oy as i32+202,width as i32,204) {return;}
+        let damage=target.damage.as_deref();
+        for row in 202..406 {
+            let yy=oy+row;
+            if yy>=target.h*target.scale || ox+width>stride {break;}
+            let src=&self.supports.cells[row*width..(row+1)*width];
+            let dst=&mut target.cells[yy*stride+ox..yy*stride+ox+width];
+            for (col,(&s,d)) in src.iter().zip(dst.iter_mut()).enumerate(){
+                if s!=0 && damage.map_or(true,|mask|mask[(yy/crate::pixel::TILE)*crate::pixel::TILES_X+(ox+col)/crate::pixel::TILE]) {*d=s;}
             }
         }
     }
@@ -189,15 +301,35 @@ impl Billboard {
         let ox=X as usize*ART_SCALE;
         let oy=Y as usize*ART_SCALE;
         let width=W*ART_SCALE;
-        if !target.overlaps(ox as i32,oy as i32+TOP_Y,width as i32,370-TOP_Y) {return;}
+        if !target.overlaps(ox as i32,oy as i32+TOP_Y,width as i32,FACE_BOTTOM as i32-TOP_Y) {return;}
         let damage=target.damage.as_deref();
-        for row in TOP_Y as usize..370 {
+        for row in TOP_Y as usize..FACE_BOTTOM {
             let y=oy+row;
             if y>=target.h*target.scale || ox+width>stride {break;}
             let src=&self.image.cells[row*width..(row+1)*width];
             let dst=&mut target.cells[y*stride+ox..y*stride+ox+width];
             for (col,(&s,d)) in src.iter().zip(dst.iter_mut()).enumerate() {
                 if s!=0 && damage.map_or(true,|mask|mask[(y/crate::pixel::TILE)*crate::pixel::TILES_X+(ox+col)/crate::pixel::TILE]) {*d=s;}
+            }
+        }
+    }
+    /// v0.55.01 default-scene placement only; geometry and cached face pixels are unchanged.
+    pub fn draw_faces_at(&mut self,target:&mut Canvas,day:bool,tick:u64,
+            seconds_today:u32,x:i32,y:i32) {
+        self.refresh(day,tick,seconds_today);
+        let stride=target.w*target.scale;
+        let ox=x as usize*ART_SCALE;
+        let oy=y as usize*ART_SCALE;
+        let width=W*ART_SCALE;
+        if !target.overlaps(ox as i32,oy as i32+TOP_Y,width as i32,FACE_BOTTOM as i32-TOP_Y) {return;}
+        let damage=target.damage.as_deref();
+        for row in TOP_Y as usize..FACE_BOTTOM {
+            let yy=oy+row;
+            if yy>=target.h*target.scale || ox+width>stride {break;}
+            let src=&self.image.cells[row*width..(row+1)*width];
+            let dst=&mut target.cells[yy*stride+ox..yy*stride+ox+width];
+            for (col,(&s,d)) in src.iter().zip(dst.iter_mut()).enumerate() {
+                if s!=0 && damage.map_or(true,|mask|mask[(yy/crate::pixel::TILE)*crate::pixel::TILES_X+(ox+col)/crate::pixel::TILE]) {*d=s;}
             }
         }
     }
@@ -211,7 +343,8 @@ impl Billboard {
     #[cfg(test)]
     fn rebuild(&mut self, day:bool,neon_phase:u8,gyro_phase:u8,seconds_today:u32) {
         self.image.cells.copy_from_slice(&self.base.cells);
-        draw_telemetry(&mut self.image,&self.snapshot);
+        draw_telemetry(&mut self.image,&self.snapshot,self.cpu_stale);
+        if let Some(hud)=&self.time_hud {draw_time_hud(&mut self.image,hud);}
         draw_clock_dynamic(&mut self.image,seconds_today,gyro_phase,self.date);
         draw_neon(&mut self.image,day,neon_phase);
     }
@@ -233,23 +366,52 @@ fn restore_rect(dst:&mut Canvas,base:&Canvas,(x,y,w,h):(usize,usize,usize,usize)
 // No live data or moving parts live here. Paint once at construction.
 fn draw_static_billboard(c:&mut Canvas) {
     panel(c,TOP_X,TOP_Y,TOP_W,TOP_H);
-    panel(c,0,75*3,270,145);
+    panel(c,0,LOWER_Y,270,LOWER_H);
     c.native_rect(TOP_X+3,TOP_Y+TOP_H+1,TOP_W-6,2,0x3e4d58);
     for x in [8,188] {die_recess(c,x,112);}
-    draw_micro_text(c,14,299,"PROC",4,0xb6a184);
-    c.native_rect(46,302,214,1,0x445560);
+    c.native_rect(10,HOST_ROW_Y,250,HOST_ROW_H,0x0d1821);
+    c.native_rect(11,HOST_ROW_Y,248,1,0x465b68);
+    for x in [76,149,204] {c.native_rect(x,HOST_ROW_Y+2,1,HOST_ROW_H-4,0x536875);}
+    draw_micro_text(c,14,PROCESS_LABEL_Y,"PROC",4,0xb6a184);
+    c.native_rect(46,PROCESS_LABEL_Y+3,214,1,0x445560);
     draw_clock_static(c);
+}
+
+fn draw_time_hud(c:&mut Canvas,hud:&TimeHud) {
+    let (x,y,w,h)=(TIME_HUD_RECT.0 as i32,TIME_HUD_RECT.1 as i32,
+        TIME_HUD_RECT.2 as i32,TIME_HUD_RECT.3 as i32);
+    c.native_rect(x,y,w,h,0x08121b);
+    c.native_rect(x,y,w,1,0x83a9b7);
+    c.native_rect(x,y+h-1,w,1,0x334d5c);
+    overlay_text(c,x+5,y+5,"TIME MACHINE",1,0x9ebfcd);
+    overlay_text(c,x+5,y+18,&hud.utc,1,0xeef6f4);
+    let mut coordinates=hud.location.split(',');
+    let lat=coordinates.next().unwrap_or("").trim();
+    let lon=coordinates.next().unwrap_or("").trim();
+    overlay_text(c,x+5,y+31,&format!("LAT {}  LON {}",lat,lon),1,0xeef6f4);
+    overlay_text(c,x+5,y+44,&format!("{} {}",hud.direction,hud.speed),1,0xeac68f);
+    draw_micro_text(c,x+5,y+76,"PROC --    CPU --    TEMP --",39,0xa3b9c4);
+    draw_micro_text(c,x+5,y+85,"MEM N/A    DISK N/A    NET N/A",40,0x9eacb8);
+}
+
+/// Native 5x7 glyphs reused by the legend; shares the jumbotron's typography.
+pub(crate) fn overlay_text(c:&mut Canvas,x:i32,y:i32,text:&str,scale:i32,color:u32) {
+    for (index,ch) in text.chars().enumerate() {
+        let x=x+index as i32*6*scale;
+        for (row,bits) in instrument_glyph(ch.to_ascii_uppercase()).iter().enumerate() {
+            for column in 0..5 {
+                if bits & (1u8 <<(4-column))!=0 {
+                    c.native_rect(x+column*scale,y+row as i32*scale,scale,scale,color);
+                }
+            }
+        }
+    }
 }
 
 // Both CPU packages, MEM/DISK, NET and the five process rows are repainted
 // exclusively on new telemetry snapshots. No historical chart is discarded.
-fn draw_telemetry(c:&mut Canvas,snapshot:&Snapshot) {
-        for (i, die) in snapshot.dies.iter().take(2).enumerate() {
-            draw_die(c, DIE_X[i], DIE_Y, die);
-        }
-        for i in snapshot.dies.len()..2 {
-            draw_empty_die(c, DIE_X[i], DIE_Y);
-        }
+fn draw_telemetry(c:&mut Canvas,snapshot:&Snapshot,cpu_stale:bool) {
+        draw_cpu_matrices(c,snapshot,cpu_stale);
         for i in 0..2 {
             let temp = snapshot.dies.get(i).and_then(|d|d.temp_c)
                 .map(|t|format!("{t}C")).unwrap_or_else(||"--C".into());
@@ -259,11 +421,8 @@ fn draw_telemetry(c:&mut Canvas,snapshot:&Snapshot) {
             draw_micro_value(c,DIE_X[i]+57,194,&temp,5,0xe3c494);
         }
 
-        // The lower console is now a cleaner tech stack: MEM and DISK share a
-        // single shelf, NET is one bidirectional scope, PROC is quieter below.
-        draw_dual_usage_row(c, MEM_DISK_Y, &snapshot.system.memory,
-            &snapshot.system.disk);
-        draw_network_meter(c, NET_Y, &snapshot.system.network);
+        draw_host_summary(c,snapshot);
+        draw_compact_system_row(c,SYSTEM_ROW_Y,&snapshot.system);
 
         // Five real CPU-ranked processes. No host row consumes a process slot:
         // Bertha's aggregate memory is already in the upper instruments.
@@ -297,38 +456,123 @@ fn compact_bytes(bytes:u64)->String {
     else {format!("{bytes}B")}
 }
 fn compact_rate(bytes:u64)->String {
-    // Suffix /S is printed once in the NET header, leaving each value unclipped.
+    // The compact network cell is explicitly a live rate display, so the
+    // up/down arrows carry the meaning while values stay short enough to fit.
     compact_bytes(bytes)
 }
-fn draw_dual_usage_row(c:&mut Canvas,y:i32,memory:&Meter,disk:&Meter){
-    draw_half_usage_meter(c,10,y,120,"MEM",memory,0x86bfca,0xbfe3e8);
-    draw_half_usage_meter(c,140,y,120,"DISK",disk,0xc9ad7b,0xf0d9a1);
-}
-fn draw_half_usage_meter(c:&mut Canvas,x:i32,y:i32,w:i32,label:&str,meter:&Meter,accent:u32,shine:u32){
-    c.native_rect(x,y,w,28,0x0e1a24);
-    c.native_rect(x+1,y,x+w-2-(x+1)+1,1,0x31424d);
-    c.native_rect(x+1,y+2,2,8,accent);
-    draw_micro_text(c,x+6,y+3,label,4,0x9cafbb);
-    let pct=if meter.total>0 {format!("{}%",percentage(meter))} else {"--".into()};
-    draw_micro_value(c,x+w-4,y+3,&pct,4,shine);
-    if meter.total>0 {
-        let totals=format!("{} / {}",compact_bytes(meter.used),compact_bytes(meter.total));
-        draw_micro_text(c,x+6,y+13,&totals,16,0xd8e2e8);
-    } else {
-        draw_micro_text(c,x+6,y+13,"N/A",3,0x687f8d);
+fn format_frequency(mhz:Option<u64>)->String {
+    match mhz {
+        Some(v) if v>=1000 => format!("{:.2} GHZ",v as f64/1000.0),
+        Some(v) => format!("{v} MHZ"),
+        None => "--".into(),
     }
-    c.native_rect(x+4,y+22,w-8,5,0x334653);
-    c.native_rect(x+5,y+23,w-10,3,0x08121c);
-    let bars=18usize;
+}
+
+// Keep the identifying model, not vendor/trademark/core-count/nominal-clock text.
+// The original telemetry string is retained in Snapshot; this is display-only.
+fn compact_cpu_model(model:&str)->String {
+    let clean=model.split('@').next().unwrap_or("")
+        .replace("(R)","").replace("(TM)","");
+    let words:Vec<&str>=clean.split_whitespace().collect();
+    for (i,word) in words.iter().enumerate() {
+        let upper=word.to_ascii_uppercase();
+        let digits=word.chars().filter(|ch|ch.is_ascii_digit()).count();
+        let apple=upper.starts_with('M') && upper[1..].chars().all(|ch|ch.is_ascii_digit()) && digits>0;
+        if (digits>=3 || apple) && !upper.contains("CORE") && !upper.contains("THREAD")
+            && !upper.ends_with("HZ") && !upper.ends_with("TH") {
+            let mut result=word.to_string();
+            if let Some(next)=words.get(i+1) {
+                let suffix=next.to_ascii_uppercase();
+                if (suffix.starts_with('V') && suffix[1..].chars().all(|ch|ch.is_ascii_digit()) && suffix.len()>1)
+                    || (apple && matches!(suffix.as_str(),"PRO"|"MAX"|"ULTRA")) {
+                    result.push(' ');result.push_str(next);
+                }
+            }
+            return result;
+        }
+    }
+    let fallback=words.join(" ");
+    if fallback.is_empty() {"--".into()} else {fallback}
+}
+
+fn draw_host_summary(c:&mut Canvas,snapshot:&Snapshot) {
+    let host=if snapshot.system.hostname.is_empty() {"--"} else {&snapshot.system.hostname};
+    let model=compact_cpu_model(&snapshot.system.cpu_model);
+    let freq=format_frequency(snapshot.system.cpu_mhz);
+    let cpu=snapshot.rows.first().map(|r|r.cpu.as_str()).unwrap_or("--");
+    draw_text_compact(c,14,HOST_ROW_Y+4,host,10,0xe8eef1);
+    draw_text_compact(c,81,HOST_ROW_Y+4,&model,11,0xe8eef1);
+    draw_micro_value(c,201,HOST_ROW_Y+4,&freq,8,0xd6e1e8);
+    draw_micro_value(c,256,HOST_ROW_Y+4,&format!("CPU {cpu}"),8,0xe3c494);
+}
+
+// Center the visible text, including the ellipsis on a long interface name.
+fn draw_centered_text(c:&mut Canvas,x:i32,y:i32,w:i32,text:&str,max:usize,color:u32) {
+    let width=text.chars().count().min(max) as i32*6-1;
+    draw_text_compact(c,x+(w-width)/2,y,text,max,color);
+}
+
+fn draw_compact_meter(c:&mut Canvas,x:i32,y:i32,w:i32,label:&str,meter:&Meter,accent:u32,shine:u32) {
+    c.native_rect(x,y,w,SYSTEM_ROW_H,0x0e1a24);
+    let max=((w-5)/6) as usize;
+    let color=if meter.total==0 {0x687f8d} else {0xd8e2e8};
+    let percent=if meter.total==0 {"N/A".into()} else {format!("{}%",percentage(meter))};
+    let heading=format!("{label}  {percent}");
+    draw_centered_text(c,x,y+2,w,&heading,max,color);
+    let values=if meter.total==0 {"N/A".into()} else {
+        format!("{} / {}",compact_bytes(meter.used),compact_bytes(meter.total))
+    };
+    // Preserve complete units; an unusually large reading must not be clipped.
+    let shown=if values.chars().count()>max {"--"} else {&values};
+    draw_centered_text(c,x,y+12,w,shown,max,color);
+    c.native_rect(x+4,y+24,w-8,7,0x334653);
+    c.native_rect(x+5,y+25,w-10,5,0x08121c);
+    let bars=13usize;
+    let usable=(w-12).max(1);
     let lit=((percentage(meter) as usize*bars)+50)/100;
     for i in 0..bars {
-        let px=x+6+i as i32*6;
+        let px=x+6+i as i32*usable/bars as i32;
+        let next=x+6+(i+1) as i32*usable/bars as i32;
+        let bw=(next-px-1).max(1);
         let col=if meter.total==0 {0x172832}
-            else if i<lit {if i%6==5 {shine} else if i%2==0 {accent} else {mix_rgb(accent,0x537786,3,4)}}
-            else if i%6==5 {0x40515d} else {0x263541};
-        c.native_rect(px,y+23,4,3,col);
+            else if i<lit {if i%5==4 {shine} else if i%2==0 {accent} else {mix_rgb(accent,0x537786,3,4)}}
+            else if i%5==4 {0x40515d} else {0x263541};
+        c.native_rect(px,y+25,bw.min(x+w-5-px),5,col);
     }
 }
+
+fn draw_compact_network(c:&mut Canvas,x:i32,y:i32,w:i32,n:&crate::telemetry::Network) {
+    c.native_rect(x,y,w,SYSTEM_ROW_H,0x0e1a24);
+    let offline=n.interface.is_empty();
+    let iface=if offline {"OFFLINE"} else {&n.interface};
+    let max=((w-5)/6) as usize;
+    let color=if offline {0x657986} else {0xb6cbd3};
+    draw_centered_text(c,x,y+2,w,iface,max,color);
+    // Arrows label byte-per-second rates. Keep both directions on one line;
+    // reserve complete units and a full space between the two directions.
+    let rate_chars=max.saturating_sub(3)/2;
+    let rate=|bytes| {
+        let text=if offline {"--".into()} else {compact_rate(bytes)};
+        if text.chars().count()>rate_chars {"--".into()} else {text}
+    };
+    let down=rate(n.rx_per_sec);
+    let up=rate(n.tx_per_sec);
+    let rates=format!("↓{down} ↑{up}");
+    draw_centered_text(c,x,y+12,w,&rates,max,color);
+    draw_compact_traffic_trace(c,x+4,y+27,w-8,&n.tx_history,&n.rx_history,
+        0xad9974,0xf0d5a4,0x75bbcf,0xc6eaf1);
+}
+
+fn draw_compact_system_row(c:&mut Canvas,y:i32,system:&crate::telemetry::SystemStats) {
+    const MEM_W:i32=83;
+    const DISK_W:i32=84;
+    const NET_W:i32=83;
+    draw_compact_meter(c,10,y,MEM_W,"MEM",&system.memory,0x86bfca,0xbfe3e8);
+    draw_compact_meter(c,10+MEM_W,y,DISK_W,"DISK",&system.disk,0xc9ad7b,0xf0d9a1);
+    draw_compact_network(c,10+MEM_W+DISK_W,y,NET_W,&system.network);
+    for x in [10+MEM_W,10+MEM_W+DISK_W] {c.native_rect(x,y+2,1,SYSTEM_ROW_H-4,0x536875);}
+}
+
 // Small deterministic color mix; no allocations or float math per pixel.
 fn mix_rgb(a:u32,b:u32,wa:u32,sum:u32)->u32 {
     let wb=sum-wa;
@@ -337,49 +581,33 @@ fn mix_rgb(a:u32,b:u32,wa:u32,sum:u32)->u32 {
     let bl=((a&255)*wa+(b&255)*wb)/sum;
     (r<<16)|(g<<8)|bl
 }
-fn draw_network_meter(c:&mut Canvas,y:i32,n:&crate::telemetry::Network) {
-    c.native_rect(10,y,250,29,0x0e1a24);
-    c.native_rect(11,y,248,1,0x31424d);
-    c.native_rect(11,y+2,2,8,0x7ca9af);
-    draw_micro_text(c,16,y+3,"NET",3,0x9cafbb);
-    if n.interface.is_empty() {draw_micro_value(c,257,y+3,"OFFLINE",9,0x657986);}
-    else {draw_micro_value(c,257,y+3,&n.interface.to_uppercase(),12,0xb6cbd3);}
-    let down=format!("DN {}",compact_rate(n.rx_per_sec));
-    let up=format!("UP {}",compact_rate(n.tx_per_sec));
-    draw_micro_text(c,16,y+13,&down,12,0x7bc8d8);
-    draw_micro_text(c,76,y+13,&up,12,0xc8b182);
-    draw_bidirectional_traffic_trace(c,129,y+21,&n.tx_history,&n.rx_history,
-        0xad9974,0xf0d5a4,0x75bbcf,0xc6eaf1);
-}
-fn draw_bidirectional_traffic_trace(c:&mut Canvas,x:i32,baseline_y:i32,up_history:&[u64],down_history:&[u64],
-    up_ink:u32,up_tip:u32,down_ink:u32,down_tip:u32) {
-    c.native_rect(x-2,baseline_y-6,116,13,0x152630);
-    c.native_rect(x-2,baseline_y,116,1,0x51636f);
-    for i in 0..=7 {c.native_put(x+i*15,baseline_y,0x61737f);}
+
+fn draw_compact_traffic_trace(c:&mut Canvas,x:i32,baseline_y:i32,width:i32,
+    up_history:&[u64],down_history:&[u64],up_ink:u32,up_tip:u32,down_ink:u32,down_tip:u32) {
+    if width<=1 {return;}
+    // No graph box: both histories originate at this single horizontal line.
+    c.native_rect(x,baseline_y,width,1,0x51636f);
     let up_samples=up_history.len().min(NET_HISTORY);
     let down_samples=down_history.len().min(NET_HISTORY);
-    let max_up=up_history.iter().copied().max().unwrap_or(0);
-    let max_down=down_history.iter().copied().max().unwrap_or(0);
-    let max=max_up.max(max_down);
+    let max=up_history.iter().chain(down_history).copied().max().unwrap_or(0);
     if max==0 {return;}
-    let mut prior_up:Option<(i32,i32)>=None;
+    let project=|slot:usize| x+((slot as i32)*(width-1))/((NET_HISTORY-1) as i32);
+    let mut prior_up=None;
     let leading_up=NET_HISTORY-up_samples;
     for (idx,&speed) in up_history[up_history.len().saturating_sub(up_samples)..].iter().enumerate() {
-        let px=x+(leading_up+idx) as i32*3;
-        let pct=(speed as f64/max as f64).sqrt();
-        let py=baseline_y-(pct*5.0).round() as i32;
+        let px=project(leading_up+idx);
+        let py=baseline_y-((speed as f64/max as f64).sqrt()*5.0).round() as i32;
         if let Some((ox,oy))=prior_up {line(c,ox,oy,px,py,up_ink);}
-        if idx+1==up_samples {c.native_rect(px-1,py-1,3,3,up_tip);}
+        if idx+1==up_samples {c.native_put(px,py,up_tip);}
         prior_up=Some((px,py));
     }
-    let mut prior_down:Option<(i32,i32)>=None;
+    let mut prior_down=None;
     let leading_down=NET_HISTORY-down_samples;
     for (idx,&speed) in down_history[down_history.len().saturating_sub(down_samples)..].iter().enumerate() {
-        let px=x+(leading_down+idx) as i32*3;
-        let pct=(speed as f64/max as f64).sqrt();
-        let py=baseline_y+(pct*5.0).round() as i32;
+        let px=project(leading_down+idx);
+        let py=baseline_y+((speed as f64/max as f64).sqrt()*5.0).round() as i32;
         if let Some((ox,oy))=prior_down {line(c,ox,oy,px,py,down_ink);}
-        if idx+1==down_samples {c.native_rect(px-1,py-1,3,3,down_tip);}
+        if idx+1==down_samples {c.native_put(px,py,down_tip);}
         prior_down=Some((px,py));
     }
 }
@@ -420,23 +648,52 @@ fn die_recess(c:&mut Canvas,x:i32,y:i32){
         for dy in [4,95] { c.native_put(x+dx,y+dy,0x81909a); }
     }
 }
-// Direct utilization buckets. 90% means visually pegged, not literal 100%.
-fn led_color(pct:u8)->u32 {
-    match pct {
-        0..=14 => 0x29af55,  // green green: idle
-        15..=49 => 0xcce63f, // tennis-ball yellow: some load
-        50..=89 => 0xf39336, // orange: heavy
-        _ => 0xf24a3f,       // red: pegged
+// Colors are selected from verified raw tick ratios in telemetry.rs;
+// the renderer never infers idle from a rounded integer percentage.
+fn led_color(band:CpuBand)->u32 {
+    match band {
+        CpuBand::Idle => 0x29af55,
+        CpuBand::Yellow => 0xcce63f,
+        CpuBand::Orange => 0xf39336,
+        CpuBand::Red => 0xf24a3f,
     }
 }
-fn draw_die(c:&mut Canvas,x:i32,y:i32,die:&Die) {
+fn draw_cpu_matrices(c:&mut Canvas,snapshot:&Snapshot,stale:bool) {
+    for i in 0..2 {
+        if let Some(die)=snapshot.dies.get(i) {
+            draw_die_state(c,DIE_X[i],DIE_Y,die,stale);
+        } else {
+            draw_empty_die(c,DIE_X[i],DIE_Y);
+        }
+    }
+}
+fn draw_invalid_core(c:&mut Canvas,x:i32,y:i32) {
+    // Charcoal base with restrained diagonal graphite stripes, native pixels;
+    // no motion, no transparency, and no extra work on ordinary frames.
+    c.native_rect(x,y,DIE_SIZE,DIE_SIZE,0x11151a);
+    for py in 0..DIE_SIZE {
+        for px in 0..DIE_SIZE {
+            if (px+py).rem_euclid(6)<2 {
+                c.native_put(x+px,y+py,0x49515a);
+            }
+        }
+    }
+}
+fn draw_die_state(c:&mut Canvas,x:i32,y:i32,die:&Die,stale:bool) {
     for idx in 0..16 {
         let cx=x+(idx%4) as i32*DIE_PITCH;
         let cy=y+(idx/4) as i32*DIE_PITCH;
-        // A core *present* at 0% is GREEN. An absent logical slot is GRAY.
-        let color=die.cores.get(idx).map(|&load|led_color(load)).unwrap_or(DEAD_DIE);
-        c.native_rect(cx,cy,DIE_SIZE,DIE_SIZE,color);
+        match die.cores.get(idx) {
+            None => c.native_rect(cx,cy,DIE_SIZE,DIE_SIZE,DEAD_DIE),
+            Some(core) => match (stale,core.state) {
+                (true,_) | (_,CoreState::Invalid) => draw_invalid_core(c,cx,cy),
+                (_,CoreState::Valid(band)) => c.native_rect(cx,cy,DIE_SIZE,DIE_SIZE,led_color(band)),
+            },
+        }
     }
+}
+fn draw_die(c:&mut Canvas,x:i32,y:i32,die:&Die) {
+    draw_die_state(c,x,y,die,false);
 }
 fn draw_empty_die(c:&mut Canvas,x:i32,y:i32) {
     for idx in 0..16 {
@@ -657,19 +914,7 @@ fn draw_neon(c:&mut Canvas,day:bool,phase:u8){
         if day {0x544445} else if bright {0xd7654e} else {0x8e443d});
 }
 
-// 5x7 glyphs keep M/N/W and numeric units distinct. Vertical doubling
-// gives the narrow telemetry columns a crisp 14px cap height at native size.
-fn draw_instrument_text(c:&mut Canvas,x:i32,y:i32,text:&str,max:usize,fg:u32){
-    for (i,ch) in text.chars().take(max).enumerate() {
-        for (dy,bits) in instrument_glyph(ch.to_ascii_uppercase()).iter().enumerate() {
-            for dx in 0..5 {
-                if bits & (1u8<<(4-dx))!=0 {
-                    c.native_rect(x+i as i32*6+dx,y+dy as i32*2,1,2,fg);
-                }
-            }
-        }
-    }
-}
+// 5x7 micro glyphs keep M/N/W and numeric units distinct.
 fn draw_micro_text(c:&mut Canvas,x:i32,y:i32,text:&str,max:usize,fg:u32){
     for (i,ch) in text.chars().take(max).enumerate() {
         for (dy,bits) in instrument_glyph(ch.to_ascii_uppercase()).iter().enumerate() {
@@ -678,13 +923,6 @@ fn draw_micro_text(c:&mut Canvas,x:i32,y:i32,text:&str,max:usize,fg:u32){
             }}
         }
     }
-}
-fn draw_value(c:&mut Canvas,right:i32,y:i32,text:&str,max:usize,fg:u32){
-    let count=text.chars().count();
-    // Never silently chop a numeric unit or percentage into a false reading.
-    let shown=if count>max {"--"} else {text};
-    let width=shown.chars().count() as i32*6-1;
-    draw_instrument_text(c,right-width,y,shown,max,fg);
 }
 fn draw_micro_value(c:&mut Canvas,right:i32,y:i32,text:&str,max:usize,fg:u32){
     // Never drop an attached unit or '%' when a value exceeds its cell.
@@ -713,7 +951,7 @@ fn instrument_glyph(ch:char)->[u8;7]{
         'F'=>[31, 16, 16, 30, 16, 16, 16],
         'G'=>[14, 17, 16, 23, 17, 17, 15],
         'H'=>[17, 17, 17, 31, 17, 17, 17],
-        'I'=>[14, 4, 4, 4, 4, 4, 14],
+        'I'|'Î'=>[14, 4, 4, 4, 4, 4, 14],
         'J'=>[7, 2, 2, 2, 2, 18, 12],
         'K'=>[17, 18, 20, 24, 20, 18, 17],
         'L'=>[16, 16, 16, 16, 16, 16, 31],
@@ -742,16 +980,31 @@ fn instrument_glyph(ch:char)->[u8;7]{
         '8'=>[14, 17, 17, 14, 17, 17, 14],
         '9'=>[14, 17, 17, 15, 1, 1, 14],
         '.'=>[0, 0, 0, 0, 0, 0, 4],
+        ','=>[0, 0, 0, 0, 0, 4, 8],
         '%'=>[25, 25, 2, 4, 8, 19, 19],
         '-'=>[0, 0, 0, 14, 0, 0, 0],
         '_'=>[0, 0, 0, 0, 0, 0, 31],
         '+'=>[0, 4, 4, 31, 4, 4, 0],
+        '#'=>[10, 31, 10, 10, 31, 10, 0],
+        '!'=>[4, 4, 4, 4, 4, 0, 4],
+        '"'=>[10, 10, 0, 0, 0, 0, 0],
+        '\''=>[4, 4, 8, 0, 0, 0, 0],
         '/'=>[1, 1, 2, 4, 8, 16, 16],
         ':'=>[0, 4, 4, 0, 4, 4, 0],
+        ';'=>[0, 4, 4, 0, 4, 4, 8],
+        '<'=>[1, 2, 4, 8, 4, 2, 1],
+        '>'=>[16, 8, 4, 2, 4, 8, 16],
+        '='=>[0, 0, 14, 0, 14, 0, 0],
+        '?'=>[14,17,1,2,4,0,4],
+        '·'=>[0,0,0,4,0,0,0],
         '['=>[14, 8, 8, 8, 8, 8, 14],
         ']'=>[14, 2, 2, 2, 2, 2, 14],
         '('=>[2, 4, 8, 8, 8, 4, 2],
         ')'=>[8, 4, 2, 2, 2, 4, 8],
+        '|'=>[4, 4, 4, 4, 4, 4, 4],
+        '°'=>[6, 9, 9, 6, 0, 0, 0],
+        '↑'=>[4, 14, 21, 4, 4, 4, 4],
+        '↓'=>[4, 4, 4, 4, 21, 14, 4],
         ' '=>[0, 0, 0, 0, 0, 0, 0],
         _=>[14,17,1,2,4,0,4],
     }
@@ -787,32 +1040,68 @@ fn glyph(ch:char)->[u8;5]{
         '6'=>[3,4,7,5,7],'7'=>[7,1,2,2,2],'8'=>[7,5,7,5,7],
         '9'=>[7,5,7,1,6],'.'=>[0,0,0,0,2],'%'=>[5,1,2,4,5],
         '-'=>[0,0,7,0,0],'_'=>[0,0,0,0,7],'+'=>[0,2,7,2,0],
-        '/'=>[1,1,2,4,4],' '=>[0,0,0,0,0],_=>[0,0,2,0,0],
+        '/'=>[1,1,2,4,4],':'=>[0,2,0,2,0],
+        '('=>[1,2,2,2,1],')'=>[4,2,2,2,4],
+        '↑'=>[2,7,2,2,2],'↓'=>[2,2,2,7,2],
+        ' '=>[0,0,0,0,0],_=>[0,0,2,0,0],
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::telemetry::{Row, SystemStats, Network};
+    #[test] fn time_machine_command_symbols_have_real_glyphs() {
+        let fallback=[14,17,1,2,4,0,4];
+        for ch in ['#','!',';','<','>','=','·','°'] {assert_ne!(instrument_glyph(ch),fallback,"missing glyph {ch}");}
+    }
+    #[test] fn cryptid_and_admin_labels_have_required_glyphs() {
+        let fallback=[14,17,1,2,4,0,4];
+        assert_ne!(instrument_glyph('\''),fallback);
+        assert_eq!(instrument_glyph('Î'),instrument_glyph('I'));
+    }
+    use crate::telemetry::{Row, SystemStats, Network, CoreReading};
+    fn row(id:u32,state:CoreState)->CoreReading {CoreReading{id,state}}
+    fn fixture_cores(band:CpuBand)->Vec<CoreReading> {
+        (0..16).map(|id|row(id,CoreState::Valid(band))).collect()
+    }
     fn snap()->Snapshot{
         Snapshot {rows:vec![Row{name:"bertha".into(),mem:"1.2g".into(),cpu:"0.6%".into()}],
-            system:SystemStats::default(), dies:vec![Die{package:0,temp_c:Some(42),cores:vec![10;16]},
-                Die{package:1,temp_c:Some(39),cores:vec![95;16]}]}
+            system:SystemStats::default(), dies:vec![Die{package:0,temp_c:Some(42),cores:fixture_cores(CpuBand::Yellow)},
+                Die{package:1,temp_c:Some(39),cores:fixture_cores(CpuBand::Red)}]}
+    }
+    #[test] fn unavailable_billboard_fallback_is_never_mistaken_for_valid_telemetry() {
+        let mut board=Billboard::unavailable();
+        assert_eq!(board.snapshot.dies.len(),2);
+        for die in &board.snapshot.dies {
+            assert_eq!(die.temp_c,None);
+            assert_eq!(die.cores.len(),16);
+            assert!(die.cores.iter().all(|core|core.state==CoreState::Invalid));
+        }
+        assert_eq!(board.snapshot.rows.len(),TOP_PROCESSES+1);
+        assert!(board.snapshot.rows.iter().all(|row|row.name=="--" && row.mem=="--" && row.cpu=="--"));
+        assert_eq!(board.snapshot.system.memory.total,0);
+        assert_eq!(board.snapshot.system.disk.total,0);
+        assert!(board.snapshot.system.network.interface.is_empty());
+        let hud=TimeHud {utc:"2026-10-14 20:30:00".into(),
+            location:"+40.123000, -105.456000".into(),direction:"BACKWARD",speed:"3600X".into()};
+        assert!(board.set_time_hud(hud.clone()));
+        assert!(!board.set_time_hud(hud));
+        let mut canvas=Canvas::scaled(crate::pixel::LOGICAL_W,crate::pixel::LOGICAL_H,ART_SCALE,false);
+        board.draw_faces(&mut canvas,false,0,73800);
+        assert!(!board.hud_dirty);
+        assert!(board.time_hud.is_some());
     }
     #[test] fn exact_four_state_ramp(){
-        assert_eq!(led_color(0),led_color(14));
-        assert_ne!(led_color(14),led_color(15));
-        assert_eq!(led_color(15),led_color(49));
-        assert_ne!(led_color(49),led_color(50));
-        assert_eq!(led_color(50),led_color(89));
-        assert_ne!(led_color(89),led_color(90));
-        assert_eq!(led_color(90),led_color(100));
+        assert_eq!(led_color(CpuBand::Idle),0x29af55);
+        assert_eq!(led_color(CpuBand::Yellow),0xcce63f);
+        assert_eq!(led_color(CpuBand::Orange),0xf39336);
+        assert_eq!(led_color(CpuBand::Red),0xf24a3f);
     }
     #[test] fn both_matrices_are_16_uniform_12px_square_pixels(){
         let mut b=Billboard::new(snap());b.rebuild(false,0,0,13*3600+27*60);
         let stride=W*ART_SCALE;
-        for (x,color) in [(DIE_X[0],led_color(10)),(DIE_X[1],led_color(95))] {
+        for (x,color) in [(DIE_X[0],led_color(CpuBand::Yellow)),
+            (DIE_X[1],led_color(CpuBand::Red))] {
             for i in 0..16 {
                 let cx=x+(i%4)*DIE_PITCH;
                 let cy=DIE_Y+(i/4)*DIE_PITCH;
@@ -824,17 +1113,67 @@ mod tests {
     }
     #[test] fn absent_cores_are_gray_but_idle_cores_are_green(){
         let mut c=Canvas::scaled(W,H,ART_SCALE,false);
-        let partial=Die{package:0,temp_c:None,cores:vec![0;5]};
+        let partial=Die{package:0,temp_c:None,cores:(0..5).map(|id|
+            row(id,CoreState::Valid(CpuBand::Idle))).collect()};
         draw_die(&mut c,DIE_X[0],DIE_Y,&partial);
         draw_empty_die(&mut c,DIE_X[1],DIE_Y);
         let w=W*ART_SCALE;
-        assert_eq!(c.cells[DIE_Y as usize*w+DIE_X[0] as usize],led_color(0));
-        assert_eq!(c.cells[DIE_Y as usize*w+(DIE_X[0]+2*DIE_PITCH) as usize],DEAD_DIE);
+        assert_eq!(c.cells[DIE_Y as usize*w+DIE_X[0] as usize],led_color(CpuBand::Idle));
+        // Five populated slots means indices 0..4 exist: index 2 is still
+        // green; index 5 (row 1, col 1) is the first absent interior slot.
+        assert_eq!(c.cells[DIE_Y as usize*w+(DIE_X[0]+2*DIE_PITCH) as usize],led_color(CpuBand::Idle));
+        assert_eq!(c.cells[(DIE_Y+DIE_PITCH) as usize*w+
+            (DIE_X[0]+DIE_PITCH) as usize],DEAD_DIE);
         assert_eq!(c.cells[DIE_Y as usize*w+DIE_X[1] as usize],DEAD_DIE);
         assert_eq!(DEAD_DIE,0x101216);
     }
-    #[test] fn upper_cabinet_matches_lower_cabinet_and_dies_flank_center(){
-        assert_eq!((TOP_X,TOP_Y,TOP_W,TOP_H),(0,104,270,116));
+    #[test] fn striped_invalid_is_not_green_and_absent_remains_original_graphite(){
+        let mut c=Canvas::scaled(W,H,ART_SCALE,false);
+        let die=Die{package:0,temp_c:None,cores:vec![
+            row(0,CoreState::Invalid),row(1,CoreState::Valid(CpuBand::Idle))]};
+        draw_die(&mut c,DIE_X[0],DIE_Y,&die);
+        let w=W*ART_SCALE;
+        let at=|x:i32,y:i32|c.cells[y as usize*w+x as usize];
+        assert_eq!(at(DIE_X[0],DIE_Y),0x49515a);
+        assert_eq!(at(DIE_X[0]+3,DIE_Y),0x11151a);
+        assert_eq!(at(DIE_X[0]+DIE_PITCH,DIE_Y),0x29af55);
+        assert_eq!(at(DIE_X[0]+2*DIE_PITCH,DIE_Y),DEAD_DIE);
+        let mut stale=Canvas::scaled(W,H,ART_SCALE,false);
+        draw_die_state(&mut stale,DIE_X[0],DIE_Y,&die,true);
+        assert_eq!(stale.cells[DIE_Y as usize*w+(DIE_X[0]+DIE_PITCH) as usize],0x49515a);
+        assert_eq!(stale.cells[DIE_Y as usize*w+(DIE_X[0]+2*DIE_PITCH) as usize],DEAD_DIE);
+    }
+    #[test] fn six_second_timeout_repaints_only_cpu_matrices_and_recovers() {
+        let initial=snap();
+        let mut b=Billboard::new(initial.clone());
+        b.refresh(false,0,12*3600);
+        let before=b.image.cells.clone();
+        let anchor=b.last_cpu_received;
+        assert!(!b.expire_cpu_if_stale(anchor+Duration::from_millis(5999)));
+        assert!(b.expire_cpu_if_stale(anchor+Duration::from_secs(6)));
+        assert!(!b.expire_cpu_if_stale(anchor+Duration::from_secs(9)));
+        b.refresh(false,0,12*3600);
+        let stride=W*ART_SCALE;
+        let mut changed=0usize;
+        for (index,(&old,&new)) in before.iter().zip(&b.image.cells).enumerate() {
+            if old!=new {
+                changed+=1;
+                let x=index%stride;
+                let y=index/stride;
+                assert!(DIE_CORE_RECTS.iter().any(|&(rx,ry,rw,rh)|
+                    x>=rx && x<rx+rw && y>=ry && y<ry+rh),"unexpected stale damage at {x},{y}");
+            }
+        }
+        assert!(changed>0);
+        b.update(initial);
+        assert!(!b.cpu_stale);
+        b.refresh(false,0,12*3600);
+        assert_eq!(b.image.cells,before,"fresh measured cores restore their original colors");
+        assert!(!b.expire_cpu_if_stale(Instant::now()));
+    }
+    #[test] fn upper_cabinet_grows_downward_and_dies_flank_center(){
+        assert_eq!((TOP_X,TOP_Y,TOP_W,TOP_H),(0,104,270,136));
+        assert_eq!((LOWER_Y,LOWER_H),(245,114));
         assert_eq!((DIE_SIZE,DIE_PITCH,DIE_Y),(12,15,123));
         assert_eq!(CLOCK_X,TOP_X+TOP_W/2);
         assert!(DIE_X[0]+3*DIE_PITCH+DIE_SIZE<CLOCK_X-CLOCK_RADIUS);
@@ -842,15 +1181,20 @@ mod tests {
         let mut b=Billboard::new(snap());b.rebuild(false,0,0,13*3600);
         let stride=W*ART_SCALE;
         assert_eq!(b.image.cells[TOP_Y as usize*stride+1],0x303d47);
-        assert_eq!(b.image.cells[225*stride+3],0x303d47);
+        assert_eq!(b.image.cells[LOWER_Y as usize*stride+3],0x303d47);
         assert_eq!(b.image.cells[TOP_Y as usize*stride+(TOP_W-1) as usize],0x303d47);
     }
     #[test] fn clock_and_text_and_neon_render(){
-        let mut b=Billboard::new(snap());b.rebuild(false,0,0,13*3600);
+        let mut snapshot=snap();
+        // Row zero is host telemetry, not a process row. The first real
+        // Row zero is represented in the upper host strip; process rows remain
+        // dedicated to the five CPU-ranked processes in the lower cabinet.
+        snapshot.rows.push(Row{name:"bertha-worker".into(),mem:"3m".into(),cpu:"0.5%".into()});
+        let mut b=Billboard::new(snapshot);b.rebuild(false,0,0,13*3600);
         let stride=W*ART_SCALE;
         assert_eq!(b.image.cells[CLOCK_Y as usize*stride+CLOCK_X as usize],0xe2769d);
-        assert_eq!(b.image.cells[247*stride+14],CREAM); // BERTHA B is 7 native px tall
-        assert!(b.image.cells[122*stride+295]!=0x29181e); // illuminated attached HDL
+        assert_eq!(b.image.cells[PROCESS_ROW_Y as usize*stride+18],CREAM);
+        assert!(b.image.cells[122*stride+295]!=0x29181e); // attached HDL
     }
     #[test] fn long_process_names_mark_truncation_within_24_char_gutter(){
         let mut a=Canvas::new(200,20);let mut b=Canvas::new(200,20);
@@ -889,10 +1233,10 @@ mod tests {
         b.rebuild(false,0,0,22*3600);
         assert_ne!(bright[125*(W*ART_SCALE)+HDL_LETTER_X as usize],
             b.image.cells[125*(W*ART_SCALE)+HDL_LETTER_X as usize]);
-        assert!(HDL_CASE_X-(TOP_X+TOP_W)>=10);
-        assert!(HDL_CASE_X+28<W as i32*ART_SCALE);
+        const { assert!(HDL_CASE_X-(TOP_X+TOP_W)>=10); }
+        assert!(HDL_CASE_X+28<(W*ART_SCALE) as i32);
         assert_eq!(HDL_PITCH,33);
-        assert!(HDL_CASE_H<TOP_H);
+        const { assert!(HDL_CASE_H<TOP_H); }
         // Non-bridge middle remains transparent between separate cabinets.
         for x in TOP_W..HDL_CASE_X {
             assert_eq!(b.image.cells[180*(W*ART_SCALE)+x as usize],0);
@@ -1022,8 +1366,8 @@ mod tests {
     #[test] fn central_clock_is_inset_and_hillside_coordinates_unchanged(){
         assert_eq!((X,Y),(7,0));
         assert_eq!(CLOCK_RADIUS,49);
-        assert!(CLOCK_Y-CLOCK_RADIUS>TOP_Y+6);
-        assert!(CLOCK_Y+CLOCK_RADIUS<TOP_Y+TOP_H-6);
+        const { assert!(CLOCK_Y-CLOCK_RADIUS>TOP_Y+6); }
+        const { assert!(CLOCK_Y+CLOCK_RADIUS<TOP_Y+TOP_H-6); }
         let mut b=Billboard::new(snap());b.rebuild(false,0,0,13*3600);
         let w=W*ART_SCALE;
         assert_eq!(b.image.cells[(CLOCK_Y-CLOCK_RADIUS) as usize*w+CLOCK_X as usize],0xf4f8fa);
@@ -1034,8 +1378,9 @@ mod tests {
     }
     #[test] fn five_process_rows_fit_below_three_instruments() {
         assert_eq!(TOP_PROCESSES,5);
-        assert_eq!(PROCESS_ROW_Y+((TOP_PROCESSES-1) as i32)*PROCESS_ROW_PITCH+7,363);
-        assert!(NET_Y+29<304);
+        assert_eq!(PROCESS_ROW_Y+((TOP_PROCESSES-1) as i32)*PROCESS_ROW_PITCH+7,350);
+        const { assert!(SYSTEM_ROW_Y+SYSTEM_ROW_H<PROCESS_LABEL_Y); }
+        const { assert!(PROCESS_ROW_Y+((TOP_PROCESSES-1) as i32)*PROCESS_ROW_PITCH+PROCESS_ROW_HEIGHT<=LOWER_Y+LOWER_H-6); }
         assert!(18+NAME_CHARS as i32*6-1<221-(7*6-1));
         let mut snapshot=snap();
         snapshot.rows=(0..=TOP_PROCESSES).map(|i|Row {
@@ -1049,7 +1394,7 @@ mod tests {
             assert_eq!(b.image.cells[(y+7) as usize*w+160],
                 if i==0 {0x20313d} else if i%2==0 {0x17232c} else {0x121d26});
         }
-        assert!(DEAD_DIE<0x202020);
+        const { assert!(DEAD_DIE<0x202020); }
     }
     #[test] fn gauges_measure_and_graph_history() {
         assert_eq!(percentage(&Meter{used:30,total:120}),25);
@@ -1063,46 +1408,84 @@ mod tests {
             tx_history:vec![0,500,3000,8000]};
         let mut b=Billboard::new(snapshot);b.rebuild(false,0,0,13*3600);
         let w=W*ART_SCALE;
-        // First twenty-five percent of RAM cells glow, the remainder is dim.
-        assert_eq!(b.image.cells[(MEM_DISK_Y+23) as usize*w+12],0x86bfca);
-        assert_eq!(b.image.cells[(MEM_DISK_Y+23) as usize*w+12+14*6],0x263541);
-        assert_ne!(b.image.cells[(NET_Y+18) as usize*w+240],0);
+        // First twenty-five percent of compact RAM cells glow; later cells dim.
+        assert_eq!(b.image.cells[(SYSTEM_ROW_Y+25) as usize*w+16],0x86bfca);
+        assert_eq!(b.image.cells[(SYSTEM_ROW_Y+25) as usize*w+72],0x263541);
+        // The compact network trace retains a visible center baseline.
+        assert_eq!(b.image.cells[(SYSTEM_ROW_Y+27) as usize*w+181],0x51636f);
     }
-    // The reference follows the original .45 painter order, not the .451
-    // patch logic. This catches accidental edits to art, layering or alpha.
-    fn render_45_reference(snapshot:&Snapshot,date:ClockDate,day:bool,
+    #[test] fn cpu_model_label_keeps_model_and_drops_marketing_text() {
+        for (raw,expected) in [
+            ("Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz","i7-10750H"),
+            ("12th Gen Intel(R) Core(TM) i7-12700H","i7-12700H"),
+            ("AMD Ryzen 9 7950X 16-Core Processor","7950X"),
+            ("AMD Ryzen 7 8845HS w/ Radeon 780M Graphics","8845HS"),
+            ("Intel(R) Xeon(R) CPU E5-2690 v4 @ 2.60GHz","E5-2690 v4"),
+            ("Intel(R) Core(TM) Ultra 7 155H","155H"),
+            ("Apple M2 Pro","M2 Pro"),
+            ("", "--"),
+        ] {assert_eq!(compact_cpu_model(raw),expected);}
+    }
+    #[test] fn enlarged_telemetry_uses_proc_glyphs_without_column_spill() {
+        let mut snapshot=snap();
+        snapshot.system.hostname="testhost".into();
+        snapshot.system.cpu_model="Intel(R) Core(TM) i7-10750H CPU @ 2.60GHz".into();
+        snapshot.system.cpu_mhz=Some(4500);
+        snapshot.rows[0].cpu="100%".into();
+        let mut actual=Canvas::scaled(W,H,ART_SCALE,false);
+        let mut expected=Canvas::scaled(W,H,ART_SCALE,false);
+        draw_host_summary(&mut actual,&snapshot);
+        draw_micro_text(&mut expected,14,HOST_ROW_Y+4,"TESTHOST",10,0xe8eef1);
+        draw_micro_text(&mut expected,81,HOST_ROW_Y+4,"I7-10750H",11,0xe8eef1);
+        draw_micro_text(&mut expected,154,HOST_ROW_Y+4,"4.50 GHZ",8,0xd6e1e8);
+        draw_micro_text(&mut expected,209,HOST_ROW_Y+4,"CPU 100%",8,0xe3c494);
+        assert_eq!(actual.cells,expected.cells);
+        // Long labels must leave separators and the final cabinet gutter clear.
+        snapshot.system.hostname="a-very-long-hostname".into();
+        snapshot.system.cpu_model="unknown-model-name-without-a-number".into();
+        actual.clear(0);draw_host_summary(&mut actual,&snapshot);
+        for y in HOST_ROW_Y..HOST_ROW_Y+HOST_ROW_H {
+            for x in [76,149,204,259] {
+                assert_eq!(actual.cells[y as usize*W*ART_SCALE+x],0);
+            }
+        }
+        // Each lower instrument stays inside its cell, even at maximum use.
+        for (x,w,label) in [(10,83,"MEM"),(93,84,"DISK")] {
+            actual.clear(0);
+            draw_compact_meter(&mut actual,x,SYSTEM_ROW_Y,w,label,
+                &Meter{used:u64::MAX,total:u64::MAX},0x86bfca,0xbfe3e8);
+            for (i,&pixel) in actual.cells.iter().enumerate() {
+                if pixel!=0 {
+                    let (px,py)=((i%(W*ART_SCALE)) as i32,(i/(W*ART_SCALE)) as i32);
+                    assert!(px>=x && px<x+w && py>=SYSTEM_ROW_Y && py<SYSTEM_ROW_Y+SYSTEM_ROW_H);
+                }
+            }
+        }
+    }
+    #[test] fn host_strip_formats_live_frequency_and_uses_host_cpu_total() {
+        assert_eq!(format_frequency(Some(842)),"842 MHZ");
+        assert_eq!(format_frequency(Some(2400)),"2.40 GHZ");
+        assert_eq!(format_frequency(None),"--");
+        assert_ne!(instrument_glyph('↑'),instrument_glyph('?'));
+        assert_ne!(instrument_glyph('↓'),instrument_glyph('?'));
+        let mut snapshot=snap();
+        snapshot.system.hostname="bertha".into();
+        snapshot.system.cpu_model="TEST CPU MODEL".into();
+        snapshot.system.cpu_mhz=Some(2400);
+        snapshot.rows[0].cpu="6%".into();
+        let mut b=Billboard::new(snapshot);b.rebuild(false,0,0,13*3600);
+        let w=W*ART_SCALE;
+        assert_ne!(b.image.cells[(HOST_ROW_Y+4) as usize*w+14],0x0d1821);
+        assert_ne!(b.image.cells[(HOST_ROW_Y+4) as usize*w+222],0x0d1821);
+    }
+    // Full-reference composition catches damage/cache mistakes independently of
+    // the optimized partial-refresh paths used by live rendering.
+    fn render_full_reference(snapshot:&Snapshot,date:ClockDate,day:bool,
         neon_phase:u8,gyro_phase:u8,seconds_today:u32)->Vec<u32> {
         let mut c=Canvas::scaled(W,H,ART_SCALE,false);
-        panel(&mut c,TOP_X,TOP_Y,TOP_W,TOP_H);
-        panel(&mut c,0,75*3,270,145);
-        c.native_rect(TOP_X+3,TOP_Y+TOP_H+1,TOP_W-6,2,0x3e4d58);
-        for x in [8,188] {die_recess(&mut c,x,112);}
-        for (i,die) in snapshot.dies.iter().take(2).enumerate() {
-            draw_die(&mut c,DIE_X[i],DIE_Y,die);
-        }
-        for i in snapshot.dies.len()..2 {draw_empty_die(&mut c,DIE_X[i],DIE_Y);}
-        for i in 0..2 {
-            let temp=snapshot.dies.get(i).and_then(|d|d.temp_c)
-                .map(|t|format!("{t}C")).unwrap_or_else(||"--C".into());
-            draw_micro_text(&mut c,DIE_X[i],194,&format!("D{i}"),2,0xb8c5cf);
-            draw_micro_text(&mut c,DIE_X[i]+18,194,&format!("T{i}"),2,0x6f818f);
-            draw_micro_value(&mut c,DIE_X[i]+57,194,&temp,5,0xe3c494);
-        }
-        draw_dual_usage_row(&mut c,MEM_DISK_Y,&snapshot.system.memory,&snapshot.system.disk);
-        draw_network_meter(&mut c,NET_Y,&snapshot.system.network);
-        draw_micro_text(&mut c,14,299,"PROC",4,0xb6a184);
-        c.native_rect(46,302,214,1,0x445560);
-        for (i,row) in snapshot.rows.iter().skip(1).take(TOP_PROCESSES).enumerate() {
-            let y=PROCESS_ROW_Y+i as i32*PROCESS_ROW_PITCH;
-            let bg=if i==0 {0x20313d} else if i%2==0 {0x17232c} else {0x121d26};
-            c.native_rect(10,y,250,PROCESS_ROW_HEIGHT,bg);
-            c.native_rect(12,y+1,1,7,if i==0 {0xc3a477} else {0x465865});
-            draw_text_compact(&mut c,18,y,&row.name,NAME_CHARS,
-                if i==0 {CREAM} else {0xc2d0da});
-            draw_micro_value(&mut c,221,y,&row.mem,7,RAM_COLOR);
-            draw_micro_value(&mut c,258,y,&row.cpu,7,CPU_COLOR);
-        }
-        draw_clock(&mut c,seconds_today,gyro_phase,date);
+        draw_static_billboard(&mut c);
+        draw_telemetry(&mut c,snapshot,false);
+        draw_clock_dynamic(&mut c,seconds_today,gyro_phase,date);
         draw_neon(&mut c,day,neon_phase);
         c.cells
     }
@@ -1112,7 +1495,7 @@ mod tests {
             assert_eq!(found,wanted,"{context}: pixel ({},{})",i%(W*ART_SCALE),i/(W*ART_SCALE));
         }
     }
-    #[test] fn optimized_refresh_is_pixel_exact_to_45_through_all_updates() {
+    #[test] fn optimized_refresh_is_pixel_exact_to_full_reference_through_all_updates() {
         let mut initial=snap();
         initial.rows.extend((0..5).map(|i|Row {
             name:format!("worker-very-long-process-name-{i}"),
@@ -1122,11 +1505,14 @@ mod tests {
             rx_per_sec:42_000,tx_per_sec:3100,
             rx_history:(0..37).map(|i|i*190).collect(),
             tx_history:(0..37).map(|i|i*123).collect()};
+        initial.system.hostname="bertha".into();
+        initial.system.cpu_model="AMD TEST CPU".into();
+        initial.system.cpu_mhz=Some(4200);
         let mut b=Billboard::new(initial.clone());
         let date=ClockDate{weekday:0,day:12};
         b.set_date(date);
         // Initial, moving cage, unchanged brightness, bright neon, day/night
-        // switch, and minute transition must leave EXACTLY the .45 image.
+        // switch, and minute transition must leave exactly the full repaint.
         for (day,tick,secs) in [(false,0,13*3600+3*60),
             (false,5,13*3600+3*60),
             (false,12,13*3600+3*60),
@@ -1137,13 +1523,13 @@ mod tests {
             b.refresh(day,tick,secs);
             let phase=if day {0} else {((tick/12)%8) as u8};
             let gyro=((tick/GYRO_TICKS_PER_FRAME)%GYRO_STEPS as u64) as u8;
-            let reference=render_45_reference(&initial,date,day,phase,gyro,secs);
+            let reference=render_full_reference(&initial,date,day,phase,gyro,secs);
             assert_raster_equal(&b.image.cells,&reference,
                 &format!("day={day} tick={tick} secs={secs}"));
         }
         // Change all meters and a process; the clock and neon retain state.
         let mut changed=initial.clone();
-        changed.dies[0].cores[0]=99;
+        changed.dies[0].cores[0].state=CoreState::Valid(CpuBand::Red);
         changed.dies[1].temp_c=None;
         changed.system.memory=Meter{used:770,total:1000};
         changed.system.disk=Meter{used:9,total:100};
@@ -1152,14 +1538,14 @@ mod tests {
         changed.rows[1].name="new-process".into();
         b.update(changed.clone());
         b.refresh(false,73,13*3600+4*60);
-        assert_raster_equal(&b.image.cells,&render_45_reference(&changed,date,false,6,14,
+        assert_raster_equal(&b.image.cells,&render_full_reference(&changed,date,false,6,14,
             13*3600+4*60),"telemetry changed");
         // The date is exclusively a clock dirty region: no telemetry dirty.
         let next_date=ClockDate{weekday:1,day:13};
         b.set_date(next_date);
         assert!(!b.dirty && b.clock_dirty);
         b.refresh(false,73,13*3600+4*60);
-        assert_raster_equal(&b.image.cells,&render_45_reference(&changed,next_date,false,6,14,
+        assert_raster_equal(&b.image.cells,&render_full_reference(&changed,next_date,false,6,14,
             13*3600+4*60),"date changed");
     }
     #[test] fn static_cabinet_and_support_legs_survive_clock_updates() {
@@ -1184,6 +1570,12 @@ mod tests {
         assert!((X as usize+W)*ART_SCALE<=WIDTH);
         assert!((Y as usize+H)*ART_SCALE<=crate::pixel::HEIGHT);
     }
+    #[test] fn null_island_translation_hits_requested_native_bounds(){
+        assert_eq!(NULL_ISLAND_X*ART_SCALE as i32,24);
+        assert_eq!(NULL_ISLAND_Y*ART_SCALE as i32+405,582);
+        assert!((NULL_ISLAND_X as usize*ART_SCALE)+W*ART_SCALE<=WIDTH);
+        assert!(NULL_ISLAND_Y*ART_SCALE as i32+FACE_BOTTOM as i32<=crate::pixel::HEIGHT as i32);
+    }
     #[test] fn relocated_hill_position_has_two_buried_feet(){
         assert_eq!((X,Y),(7,0));
         let mut b=Billboard::new(snap());
@@ -1193,7 +1585,7 @@ mod tests {
         dst.clear(0x193c31);
         b.draw(&mut dst,false,0,13*3600);
         let w=dst.w*dst.scale;
-        for foot_x in [X*ART_SCALE+31, X*ART_SCALE+231] {
+        for foot_x in [X*ART_SCALE as i32+31, X*ART_SCALE as i32+231] {
             // A section of support is still visible above the hillside.
             assert_ne!(dst.cells[375*w+foot_x as usize],0x193c31);
             // The original footplate at native y=402 lies in the hill.

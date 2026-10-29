@@ -1,9 +1,9 @@
 //! Hand-authored native pixel wildlife. All art/color experiments stay here.
 //! Inspired by 16-bit SNES palette depth; still pure nearest-neighbor pixels.
 use crate::events::VisitorKind;
-use crate::npc::{Animal, Facing};
+use crate::npc::Animal;
 use crate::pixel::Canvas;
-use crate::sprite::{Pose, Species};
+use crate::sprite::Species;
 use crate::world::Point;
 
 fn color(ch: char, species: Species, palette: u8) -> Option<u32> {

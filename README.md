@@ -1,91 +1,114 @@
-# space_zoo v0.45.3
+   ███████╗██████╗  █████╗  ██████╗███████╗    ███████╗ ██████╗  ██████╗
+   ██╔════╝██╔══██╗██╔══██╗██╔════╝██╔════╝    ╚══███╔╝██╔═══██╗██╔═══██╗
+   ███████╗██████╔╝███████║██║     █████╗        ███╔╝ ██║   ██║██║   ██║
+   ╚════██║██╔═══╝ ██╔══██║██║     ██╔══╝       ███╔╝  ██║   ██║██║   ██║
+   ███████║██║     ██║  ██║╚██████╗███████╗    ███████╗╚██████╔╝╚██████╔╝
+   ╚══════╝╚═╝     ╚═╝  ╚═╝ ╚═════╝╚══════╝  _ ╚══════╝ ╚═════╝  ╚═════╝
 
-An educational button masher for toddlers, process monitor for grown ups, lots of easter eggs in between. Lightweight, for Linux, designed first for the bare framebuffer console. Animals roam a day/night sky with a gilded sun, phased moon, constellations, and a live system telemetry billboard. Also runs in an X11 window or as an ASCII zoo in a terminal or SSH session.
+        .                                                    +
+                    N E A R   S P A C E   C A S S E R O L E
+    *                                                        .
 
-## Build
+                              .  )  .
+                           (  .  (  .
+                          .-~~~~~~~~~-.
+                       .-'             '-.
+                    .-'___________________'-.
+               ____/_________________________\____
+              (___________________________________)
+                   \  o   o   o   o   o   o  /
+                    '-----------------------'
+                         /     |     \
+                        .      .      .
 
-Requires Rust and Cargo, a C compiler/linker, and X11 development libraries.
-On Debian/Ubuntu, install the native dependencies with:
+                   ---------------------------
+                         THE SKY IS OPEN
+
+                *        .        *
+                  .                               .
+                               _..._
+
+
+## What is this?
+
+Space Zoo is a Linux desktop program written in Rust. It is not a simulator in the strictest sense, not quite a game in the usual sense. It is a small machine for standing somewhere on Earth, turning your head toward the sky, and wondering what is out there.
+
+It puts you on Null Island, renders the sky above you using real star and planetary data, and lets you move around the planet, move through time, explore constellation cultures, and watch assorted creatures wander through the foreground.
+
+Part planetarium, part system monitor, and mostly a bad idea that got significantly out of hand.
+
+## System requirements
+
+Linux and a keyboard. Graphics run on X11 and Wayland desktops, or with an accessible Linux framebuffer; ASCII mode runs in a terminal. Minimum CPU and RAM requirements have not been established, but they are probably really really low.
+
+Building requires Rust/Cargo, a C toolchain, and X11 development libraries.
+
+## Installation
+
+Unpack the source, then extract the matching data and asset packs into its `data/` and `assets/` directories. From the source directory:
 
 ```sh
-sudo apt install build-essential pkg-config libx11-dev libxcursor-dev libxrandr-dev
+cargo build --release
 ```
 
-From the project directory:
+Missing or altered data/assets will fail build verification.
+
+## Running
+
+Prebuilt release archives (.zip or .tar.gz) can be unpacked and run directly:
+
+./target/release/space_zoo
+
+A source build produces the executable at the same path.
 
 ```sh
-cargo build --release --locked
-./target/release/space_zoo --version
+./target/release/space_zoo             # Automatic display selection
+./target/release/space_zoo --window    # Desktop window
+./target/release/space_zoo --console   # Linux framebuffer console
+./target/release/space_zoo --ascii     # Terminal / SSH
+./target/release/space_zoo --og        # the original button masher for toddlers
 ```
-
-Artwork and animation data are embedded in the executable. The X11 libraries
-are build dependencies even for console use; binaries still require compatible system libraries and architecture.
-
-## Run
-
-```sh
-./target/release/space_zoo --console  # Bare Linux console (primary mode)
-./target/release/space_zoo --window   # X11 window
-./target/release/space_zoo --ascii    # Terminal or SSH
-./target/release/space_zoo            # Auto-select mode
-```
-
-Console mode requires access to a Linux framebuffer (usually `/dev/fb0`). Set
-`FRAMEBUFFER=/dev/fb1` to use another device. Exit with **Ctrl+C** before
-switching virtual consoles.
-
-Window mode uses X11; Wayland requires XWayland and a working `DISPLAY`.
-ASCII mode requires at least 40 columns and 14 rows. Auto-select prefers a
-physical console, then ASCII for SSH or no `DISPLAY`, otherwise X11.
 
 ## Controls
 
-| Key | Action |
-| --- | --- |
-| Arrow keys | Steer the dog |
-| Enter | Call the heron |
-| C | Release hens (daytime) |
-| Escape | Call the helicopter |
-| 1 | Extra Chupacabra visit (night) |
-| 2 | Extra Sasquatch visit (night) |
-| Space / other keys | Animal reactions |
-| Ctrl+C | Exit |
+- **WASD:** look around.
+- **Arrow keys:** move across Earth; cancel an active trip.
+- **R:** reset the camera.
+- **Esc:** open the menu.
+- **`:help`** — full command reference.
+- **`:latitude,longitude`** — travel to coordinates.
+- **`:0x` / `:1x` / `:-3x`** — pause, normal speed, reverse.
+- **`:now`** — return to the current date and time.
+- **`:q!`** — quit.
 
-Each mythical visitor allows one extra requested visit per night.
+Dates and times use UTC.
 
-## Options
+## Known limitations
 
-| Flag | Purpose |
-| --- | --- |
-| `--help` | Show help and controls |
-| `--version`, `-V` | Show embedded version |
-| `--hour 0..23` | Set scene hour while animations continue |
-| `--window --animal` | Sprite viewer (arrows, C, F, Space, Escape) |
-| `--constellation` | Accelerate celestial motion for inspection |
-| `--debug` | Pixel-world inspection controls |
-| `--bench-frames N` | Headless night rendering benchmark |
-| `--bench-sun N` | Headless day rendering benchmark |
+- Astronomical accuracy is "close enough" and calibrated to "eye precision".
+- Astronomical data has finite time coverage.
+Stars / Tycho-2: approximately 2000-01-01 noon UTC through 2049-12-31.
+Planets / Pluto: 1970-01-01 through 2100-12-31.
 
-Benchmark flags must be the first argument; `N` is 1–100000. They measure
-rendering performance, not overall process CPU use.
 
-## Development
+FINAL NOTES
+-----------
 
-```sh
-cargo test --locked
-```
+Space Zoo was made to entertain a toddler that knew the keyboard was an interactive device. It is offered in the spirit of staying up too late to see
+what happens if you add one more thing.
 
-`src/` holds the application, `assets/` the embedded artwork/data inputs, and
-`tools/` optional asset generators and checks. Generators may overwrite assets
-or generated source; they are not needed for a standard build.
+Thanks to the people who measured the sky, shared their work,
+wrote the tools, and left enough notes for the rest of us to
+make something strange with them.
 
-Stable source baseline: **revision 0.453 (surgical compatibility)**.
+Thanks also to every bug that survived long enough to become a feature, every feature that survived long enough to become a bug, and every late-night decision beginning with the phrase "what if we just..."
 
-## License
+If you find yourself standing at an impossible latitude at an unreasonable hour staring at Vega through a terminal window, then the software is functioning exactly as intended.
 
-Copyright (C) 2026 HDL
+Please do not feed the planets.
+The chickens have their own arrangements.
 
-Licensed under the GNU General Public License, version 2 or later
-(`GPL-2.0-or-later`). See [LICENSE](LICENSE).
+Space Zoo.
+Near space casserole.
 
-Third-party dependencies retain their own licenses.
+The sky is open.

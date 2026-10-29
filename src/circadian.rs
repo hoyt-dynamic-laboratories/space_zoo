@@ -55,21 +55,28 @@ fn local_hms() -> Option<(u8,u8,u8)> {local_datetime().map(|(hms,_)|hms)}
 pub struct CircadianClock {
     hms: (u8,u8,u8),
     date: ClockDate,
+    // Wall clock belongs to the hardware instrument, never the simulated sky.
+    wall_hms: (u8,u8,u8),
+    wall_date: ClockDate,
     override_hour: Option<u8>,
     refresh_at: Instant,
+    solar_phase:Option<Phase>,
 }
 impl CircadianClock {
     pub fn new(override_hour: Option<u8>) -> Self {
-        // Frozen --hour places the dial at :30, useful for viewing a celestial arc.
+        // The internal fixed-hour preview places the dial at :30, useful for viewing a celestial arc.
         let local=local_datetime();
         let hms=override_hour.map(|h|(h,30,0))
             .or_else(||local.map(|(hms,_)|hms)).unwrap_or((12,30,0));
         let date=local.map(|(_,date)|date).unwrap_or(ClockDate{weekday:0,day:1});
-        Self { hms, date, override_hour, refresh_at:Instant::now()+Duration::from_secs(2) }
+        Self { hms, date, wall_hms:local.map(|(time,_)|time).unwrap_or(hms),
+            wall_date:date, override_hour, refresh_at:Instant::now()+Duration::from_secs(2),solar_phase:None }
     }
     pub fn advance(&mut self,_tick:u64) {
         if Instant::now()>=self.refresh_at {
             if let Some((next,date))=local_datetime() {
+                self.wall_hms=next;
+                self.wall_date=date;
                 if self.override_hour.is_none(){self.hms=next;}
                 self.date=date;
             }
@@ -77,7 +84,7 @@ impl CircadianClock {
         }
     }
     /// Same calendar date/time as the face clock for constellation position.
-    /// Normal play uses exact Unix seconds. In --hour preview, shift only the
+    /// Normal play uses exact Unix seconds. In the internal fixed-hour preview, shift only the
     /// star atlas to that displayed local hour, preserving the local date.
     pub fn observing_unix(&self,unix:u64)->i64 {
         if self.override_hour.is_none() {return unix as i64;}
@@ -92,14 +99,46 @@ impl CircadianClock {
         #[cfg(not(unix))]
         {unix as i64}
     }
+    pub fn preview_unix(&self,unix:u64)->Option<i64> {
+        self.override_hour.map(|_|self.observing_unix(unix))
+    }
+    pub fn set_solar_phase(&mut self,phase:Phase,fast:bool) {
+        // The fixed-hour path remains a deliberately frozen design preview. In -ff,
+        // animal rhythms track simulated solar time; wall clock stays honest.
+        if self.override_hour.is_none() || fast {self.solar_phase=Some(phase);}
+    }
+    /// --ff uses simulated UTC for celestial/game state, never for the
+    /// physical instrument (which has its own cached Linux-local clock).
+    /// No host timezone or DST is involved in the simulated clock.
+    pub fn set_simulated_utc(&mut self,utc:u64) {
+        #[cfg(unix)] {
+            let raw=utc as libc::time_t;
+            let mut tm:libc::tm=unsafe{std::mem::zeroed()};
+            if unsafe{libc::gmtime_r(&raw,&mut tm)}.is_null(){return;}
+            self.hms=(tm.tm_hour as u8,tm.tm_min as u8,tm.tm_sec as u8);
+            self.date=ClockDate{weekday:tm.tm_wday as u8,day:tm.tm_mday as u8};
+        }
+        #[cfg(not(unix))] {let _=utc;}
+    }
+    /// Feed the billboard from Linux-local time in --ff. Keep the existing
+    /// Fixed-hour preview behavior outside --ff; neither path samples each frame.
+    pub fn instrument_time(&self,fast:bool)->(u32,ClockDate) {
+        let (h,m,s,date)=if fast {
+            (self.wall_hms.0,self.wall_hms.1,self.wall_hms.2,self.wall_date)
+        } else {
+            (self.hms.0,self.hms.1,self.hms.2,self.date)
+        };
+        (h as u32*3600+m as u32*60+s as u32,date)
+    }
     pub fn date(&self)->ClockDate {self.date}
     pub fn hour(&self)->u8 {self.hms.0}
     pub fn minute(&self)->u8 {self.hms.1}
     pub fn seconds_today(&self)->u32 {
         self.hms.0 as u32*3600+self.hms.1 as u32*60+self.hms.2 as u32
     }
-    pub fn phase(&self)->Phase {Phase::at(self.hour())}
-    pub fn is_day(&self)->bool {(6..18).contains(&self.hour())}
+    pub fn phase(&self)->Phase {self.solar_phase.unwrap_or_else(||Phase::at(self.hour()))}
+    pub fn is_day(&self)->bool {self.solar_phase.map_or_else(||(6..18).contains(&self.hour()),
+        |p|matches!(p,Phase::Day))}
 }
 #[cfg(test)]
 mod tests {
@@ -115,6 +154,21 @@ mod tests {
         assert!(c.date().weekday<7 && (1..=31).contains(&c.date().day));
         assert_eq!(ClockDate{weekday:0,day:11}.weekday_name(),"SUN");
         assert_eq!(ClockDate{weekday:6,day:31}.weekday_name(),"SAT");
+    }
+    #[cfg(unix)]
+    #[test] fn time_machine_cannot_move_real_instrument_clock(){
+        let mut c=CircadianClock::new(None);
+        let live=c.instrument_time(true);
+        c.set_simulated_utc(0); // 1970-01-01, regardless of today's wall clock
+        assert_eq!(c.instrument_time(true),live);
+        assert_eq!(c.instrument_time(false),(c.seconds_today(),c.date()));
+        c.set_simulated_utc(2_000_000_000);
+        assert_eq!(c.instrument_time(true),live);
+        assert_eq!(c.instrument_time(false),(c.seconds_today(),c.date()));
+    }
+    #[test] fn non_fast_hour_preview_still_controls_instrument(){
+        let c=CircadianClock::new(Some(22));
+        assert_eq!(c.instrument_time(false).0,22*3600+30*60);
     }
     #[test] fn fixed_demo_hour_is_stable(){
         let mut c=CircadianClock::new(Some(22));c.advance(FPS*86400);

@@ -3,7 +3,6 @@ use crate::background::Background;
 use crate::deer::DeerHerd;
 use crate::bats::BatPair;
 use crate::mythic::{MythicVisitors,MythKind};
-use crate::debug_probe::DebugProbe;
 use crate::habitat::AnchorKind;
 use crate::birds::{BirdKind, BirdVisits};
 use crate::interactions::Interactions;
@@ -61,7 +60,6 @@ pub struct World {
     pub bats: BatPair,
     pub mythic: MythicVisitors,
     pub sky: SkyState,
-    pub debug_probe:Option<DebugProbe>,
     interactions: Interactions,
     pub attention: Option<Attention>,
     mode: DisplayMode,
@@ -104,7 +102,7 @@ impl World {
             events: EventManager::new(seed ^ 0x94ED_8F07_BBC1_36A2),
             birds: BirdVisits::new(),
             deer: DeerHerd::new(),bats:BatPair::new(),mythic:MythicVisitors::new(),
-            sky: SkyState::new(), debug_probe:None,
+            sky: SkyState::new(),
             interactions: Interactions::new(seed ^ 0xCCBA_0BA4_01EC_7A12),
             attention: None, mode, npc_rng,
         };
@@ -117,10 +115,6 @@ impl World {
         self.height = height;
         self.habitat.resize(width, height);
         self.deer.resize(width,height);
-        if let Some(probe)=&mut self.debug_probe {
-            let target=probe.anchor;
-            probe.snap_to(&self.habitat,target);
-        }
         for (i, animal) in self.animals.iter_mut().enumerate() {
             animal.home = self.habitat.home(animal.species, i);
             animal.band = staging::band(animal.species,height,self.mode);
@@ -131,18 +125,6 @@ impl World {
             attention.point.y = attention.point.y.clamp(0, (height as i32 - 1).max(0));
         }
         self.background.force_refresh();
-    }
-    /// Activates only for --debug, using existing wildlife sprite and anchors.
-    pub fn enable_debug(&mut self) {
-        self.debug_probe=Some(DebugProbe::new(&self.habitat,self.height));
-    }
-    pub fn debug_snap(&mut self,anchor:AnchorKind) {
-        if let Some(probe)=&mut self.debug_probe {probe.snap_to(&self.habitat,anchor);}
-    }
-    pub fn debug_nudge(&mut self,dx:i32,dy:i32) {
-        if let Some(probe)=&mut self.debug_probe {
-            probe.nudge(&self.habitat,dx,dy,self.width,self.height);
-        }
     }
     pub fn notice(&mut self) {
         let point = self.attention.map_or(Point { x: self.width as i32 / 2,
@@ -238,6 +220,10 @@ impl World {
         self.tick += 1;
         self.clock.advance(self.tick);
         self.sky.advance(self.tick, self.clock.hour(), self.width, self.height);
+        if self.sky.fast() {self.clock.set_simulated_utc(self.sky.now_secs());}
+        if self.sky.configured() {
+            self.clock.set_solar_phase(self.sky.solar_phase(),self.sky.fast());
+        }
         self.background.advance(self.tick, self.width, self.height);
         self.birds.advance(self.tick);
         if let Some(kind) = self.events.advance(self.tick, self.width, self.height) {
@@ -246,9 +232,6 @@ impl World {
             }
         }
         if self.attention.is_some_and(|a| a.until <= self.tick) { self.attention = None; }
-        // Debug is a stationary, player-controlled geometry probe. It should
-        // never roost, wander or be dragged away by neighbor social behavior.
-        if self.debug_probe.is_some() {return;}
         let alarm=self.mythic.advance(self.tick,self.clock.phase(),self.width,self.height,&self.habitat);
         if alarm {self.deer.alarm(self.tick);}
         self.deer.advance(self.tick,self.clock.phase(),self.width,self.height,
@@ -269,6 +252,22 @@ impl World {
                 self.clock.hour(), &neighbors, &self.habitat,
                 !roof_busy || already_reserved, &mut self.npc_rng);
             if animal.roof_reserved() {roof_busy=true;}
+        }
+    }
+    pub fn configure_sky(&mut self,location:crate::astronomy::Location,fast:bool) {
+        self.sky.configure(location,fast);
+        if !fast {
+            if let Some(utc)=self.clock.preview_unix(self.sky.now_secs()) {
+                self.sky.freeze_preview(utc);
+            }
+        }
+        if fast {self.clock.set_simulated_utc(self.sky.now_secs());}
+        self.clock.set_solar_phase(self.sky.solar_phase(),self.sky.fast());
+    }
+    pub fn refresh_time_machine(&mut self) {
+        if self.sky.fast() {
+            self.clock.set_simulated_utc(self.sky.now_secs());
+            self.clock.set_solar_phase(self.sky.solar_phase(),true);
         }
     }
     pub fn mode(&self) -> DisplayMode { self.mode }

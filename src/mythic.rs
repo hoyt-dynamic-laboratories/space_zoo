@@ -151,7 +151,7 @@ impl MythicVisitors {
     pub fn ascii_sprite(&self,i:usize)->Option<(Point,&'static [&'static str],Color,bool)> {
         let myth=self.visitors.get(i)?;
         if !myth.visible(){return None;}
-        let lines=if myth.kind==MythKind::Chupacabra {&CHUP_TEXT[..]}else{&SASQ_TEXT[..]};
+        let lines=if myth.kind==MythKind::Chupacabra {CHUP_TEXT}else{SASQ_TEXT};
         Some((Point{x:myth.feet.x-8,y:myth.feet.y-lines.len() as i32},lines,
             if myth.kind==MythKind::Chupacabra {Color::Cyan}else{Color::DarkRed},myth.facing_right))
     }

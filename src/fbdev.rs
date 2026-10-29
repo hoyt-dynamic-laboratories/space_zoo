@@ -138,8 +138,6 @@ impl Framebuffer {
                 && var.blue.offset == 0 && var.blue.length == 8 })
     }
 
-    pub fn geometry(&self) -> (usize, usize) { (self.width, self.height) }
-
     // Fast aligned-or-unaligned native stores: 1 store for 16/32 bpp,
     // 3 stores only for 24 bpp. Preserve fbdev's little-endian byte order.
     #[inline(always)]
@@ -279,9 +277,11 @@ fn pack_rgb(rgb: u32, red: Channel, green: Channel, blue: Channel) -> u32 {
 impl Drop for Framebuffer {
     fn drop(&mut self) {
         // Re-enable the kernel's normal text console before returning to login.
-        unsafe {
-            libc::ioctl(self.tty_fd, KDSETMODE, KD_TEXT);
-            libc::munmap(self.memory.cast(), self.length);
+        if unsafe {libc::ioctl(self.tty_fd,KDSETMODE,KD_TEXT)}<0 {
+            crate::logging::cleanup_failure("framebuffer.KD_TEXT_restore",&io::Error::last_os_error().to_string());
+        }
+        if unsafe {libc::munmap(self.memory.cast(),self.length)}<0 {
+            crate::logging::cleanup_failure("framebuffer.munmap",&io::Error::last_os_error().to_string());
         }
     }
 }

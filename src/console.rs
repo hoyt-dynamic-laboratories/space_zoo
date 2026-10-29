@@ -18,6 +18,8 @@ mod platform {
     #[derive(Clone, Copy, Default)]
     struct VtMode { mode: u8, waitv: u8, relsig: i16, acqsig: i16, frsig: i16 }
 
+    // Async-signal-safe: just records a pending request atomically. The
+    // ioctl is intentionally performed by Guard::poll, never in the handler.
     extern "C" fn release_signal(_sig: c_int) {
         RELEASE_REQUESTED.store(true, Ordering::Relaxed);
     }
@@ -52,7 +54,7 @@ mod platform {
             }
             RELEASE_REQUESTED.store(false, Ordering::Relaxed);
             let handler = unsafe {
-                libc::signal(libc::SIGUSR1, release_signal as libc::sighandler_t)
+                libc::signal(libc::SIGUSR1, release_signal as *const () as libc::sighandler_t)
             };
             if handler == libc::SIG_ERR { return Err(io::Error::last_os_error()); }
             let mode = VtMode { mode: VT_PROCESS, waitv: 0,
@@ -73,12 +75,26 @@ mod platform {
         }
     }
 
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn release_callback_only_sets_pending_flag() {
+            RELEASE_REQUESTED.store(false, Ordering::Relaxed);
+            release_signal(libc::SIGUSR1);
+            assert!(RELEASE_REQUESTED.swap(false, Ordering::Relaxed));
+            assert!(!RELEASE_REQUESTED.load(Ordering::Relaxed));
+        }
+    }
+
     impl Drop for Guard {
         fn drop(&mut self) {
             // Always reset to auto before restoring the previous handler.
-            unsafe {
-                libc::ioctl(self.fd, VT_SETMODE, &self.original);
-                libc::signal(libc::SIGUSR1, self.previous_handler);
+            if unsafe {libc::ioctl(self.fd,VT_SETMODE,&self.original)}<0 {
+                crate::logging::cleanup_failure("console.VT_SETMODE_restore",&io::Error::last_os_error().to_string());
+            }
+            if unsafe {libc::signal(libc::SIGUSR1,self.previous_handler)}==libc::SIG_ERR {
+                crate::logging::cleanup_failure("console.SIGUSR1_restore",&io::Error::last_os_error().to_string());
             }
         }
     }

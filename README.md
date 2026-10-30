@@ -1,3 +1,4 @@
+```text
    ███████╗██████╗  █████╗  ██████╗███████╗    ███████╗ ██████╗  ██████╗
    ██╔════╝██╔══██╗██╔══██╗██╔════╝██╔════╝    ╚══███╔╝██╔═══██╗██╔═══██╗
    ███████╗██████╔╝███████║██║     █████╗        ███╔╝ ██║   ██║██║   ██║
@@ -28,7 +29,7 @@
                   .                               .
                                _..._
 
-
+```
 ## What is this?
 
 Space Zoo is a Linux desktop program written in Rust. It is not a simulator in the strictest sense, not quite a game in the usual sense. It is a small machine for standing somewhere on Earth, turning your head toward the sky, and wondering what is out there.

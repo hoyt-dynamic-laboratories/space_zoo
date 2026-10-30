@@ -1,0 +1,22 @@
+# Target.
+/target/
+
+# Large payloads distributed separately.
+# Git tracks integrity checksums.
+/data/*
+!/data/SHA256SUMS
+
+/assets/*
+!/assets/SHA256SUMS
+
+# Python tooling caches.
+/__pycache__/
+*.py[cod]
+.venv/
+
+# Local editor and OS leftovers.
+.vscode/
+*.swp
+*.swo
+*~
+.DS_Store

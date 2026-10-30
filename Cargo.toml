@@ -1,0 +1,13 @@
+[package]
+name = "space_zoo"
+# Cargo package version tracks the source release.
+version = "0.56.0"
+edition = "2021"
+description = "A lightweight, console-first animated zoo for Linux"
+license = "GPL-2.0-or-later"
+
+[dependencies]
+crossterm = "=0.27.0"
+minifb = { version = "=0.27.0", default-features = false, features = ["x11"] }
+libc = "=0.2.159"
+x11-dl = "=2.21.0"
